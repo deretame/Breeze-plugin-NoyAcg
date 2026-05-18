@@ -67,10 +67,22 @@ let cookieStoreLoaded = false;
 let loginInFlight: Promise<string> | null = null;
 let noyInitStarted = false;
 
+async function persistConfigValue(key: string, value: string) {
+  await Promise.all([cache.set(key, value), saveConfigString(key, value)]);
+}
+
+function readConfigValueSync(key: string, fallback: string): string {
+  return String(cache.getSync(key, fallback));
+}
+
+async function readConfigValue(key: string, fallback: string): Promise<string> {
+  return await loadAndNormalizeConfigString(key, fallback);
+}
+
 function getDefaultHeadersSync() {
   const headers: Record<string, string> = {
     "User-Agent": "NoyAcg/3.0",
-    "allow-adult": String(cache.getSync(ALLOW_ADULT_CONFIG_KEY, "false")),
+    "allow-adult": readConfigValueSync(ALLOW_ADULT_CONFIG_KEY, "both"),
     Accept: "application/json, text/plain, */*",
   };
   const cookie = getCookieHeader();
@@ -132,10 +144,7 @@ const loginRetryMiddleware: ConfiguredMiddleware =
 
 async function getDomainGroup() {
   try {
-    const raw = await loadAndNormalizeConfigString(
-      DOMAIN_GROUP_CONFIG_KEY,
-      "2",
-    );
+    const raw = await readConfigValue(DOMAIN_GROUP_CONFIG_KEY, "2");
     const index = Number(raw);
     return BASE_GROUPS[
       Number.isFinite(index) && index >= 0 && index <= 2 ? index : 2
@@ -212,13 +221,11 @@ async function loadAndNormalizeConfigString(key: string, fallback = "") {
 }
 
 async function loadAuthAccount() {
-  return (
-    await loadAndNormalizeConfigString(AUTH_ACCOUNT_CONFIG_KEY, "")
-  ).trim();
+  return (await readConfigValue(AUTH_ACCOUNT_CONFIG_KEY, "")).trim();
 }
 
 async function loadAuthPassword() {
-  return await loadAndNormalizeConfigString(AUTH_PASSWORD_CONFIG_KEY, "");
+  return await readConfigValue(AUTH_PASSWORD_CONFIG_KEY, "");
 }
 
 async function loadCookieStore() {
@@ -336,6 +343,7 @@ async function loginWithPassword(payload: LoginPayload = {}) {
       ]);
     }
     await saveCookieStore();
+    ``;
     return account;
   })();
 
@@ -410,11 +418,10 @@ async function setPasswordAndLogin(payload: Record<string, unknown> = {}) {
 
 async function setDomainGroup(payload: Record<string, unknown> = {}) {
   const value = readSettingPayloadValue(payload, DOMAIN_GROUP_CONFIG_KEY);
-  await saveConfigString(DOMAIN_GROUP_CONFIG_KEY, value);
+  await persistConfigValue(DOMAIN_GROUP_CONFIG_KEY, value);
   cookieStore.clear();
   cookieStoreLoaded = false;
   await saveCookieStore();
-  flutterTools.showToast({ message: "线路已切换", level: "success" });
   return {
     source: PLUGIN_ID,
     data: { domainGroup: value },
@@ -422,19 +429,9 @@ async function setDomainGroup(payload: Record<string, unknown> = {}) {
 }
 
 async function setAllowAdult(payload: Record<string, unknown> = {}) {
-  console.log("setAllowAdult", payload);
   const raw = readSettingPayloadValue(payload, ALLOW_ADULT_CONFIG_KEY);
-  // 开关 ON → "true" → 存入 "false"（allow-adult: false = 过滤）
-  // 开关 OFF → "false" → 存入 "true"（allow-adult: true = 不过滤）
-  const value = raw === "true" ? "false" : "true";
-  await Promise.all([
-    cache.set(ALLOW_ADULT_CONFIG_KEY, value),
-    saveConfigString(ALLOW_ADULT_CONFIG_KEY, value),
-  ]);
-  flutterTools.showToast({
-    message: value === "false" ? "已过滤成人内容" : "已关闭过滤",
-    level: "success",
-  });
+  const value = raw || "both";
+  await persistConfigValue(ALLOW_ADULT_CONFIG_KEY, value);
   return {
     source: PLUGIN_ID,
     data: { allowAdult: value },
@@ -488,6 +485,7 @@ async function tryAutoLogin(reason: string) {
 function buildSearchResult(
   json: Record<string, unknown>,
   page: number,
+  baseImg: string,
   ext: Record<string, unknown> | null | undefined,
 ) {
   const dataList = (
@@ -498,21 +496,27 @@ function buildSearchResult(
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
 
   const items = dataList.map((item) => {
-    const comicId = String(item.bid ?? "").trim();
-    const title = String(item.bookname ?? "").trim() || `漫画 ${comicId}`;
-    const coverUrl = String(item.cover ?? "").trim();
+    const comicId = String(item.id ?? "").trim();
+    const title = String(item.name ?? "").trim() || `漫画 ${comicId}`;
+    const coverUrl = comicId ? `${baseImg}/${comicId}/m1.webp` : "";
     const author = String(item.author ?? "").trim();
-    const statusText = String(item.status ?? "").trim();
+    const isAdult = item.adult === 1;
+    const isFinished = item.status === 0;
+    const statusText = isFinished ? "短篇" : "连载中";
+    const tagList = Array.isArray(item.tags) ? item.tags : [];
+    const description = String(item.description ?? "").trim();
     const path = `comic/${comicId}/cover.webp`;
 
     return {
       source: PLUGIN_ID,
       id: comicId,
       title,
-      subtitle: [author, statusText].filter(Boolean).join(" · "),
-      finished: /完结|短篇/.test(statusText),
-      likesCount: 0,
-      viewsCount: 0,
+      subtitle: [author, isAdult ? "R18" : null, statusText]
+        .filter(Boolean)
+        .join(" · "),
+      finished: isFinished,
+      likesCount: toNumber(item.favorites, 0),
+      viewsCount: toNumber(item.views, 0),
       updatedAt: "",
       cover: {
         id: comicId,
@@ -522,10 +526,28 @@ function buildSearchResult(
         extern: { path },
       },
       metadata: [
-        createBasicMetadata("author", "作者", author ? [author] : []),
-        createBasicMetadata("status", "状态", statusText ? [statusText] : []),
+        createMetadataActionList(
+          "author",
+          "作者",
+          author ? [author] : [],
+          (item) =>
+            createActionItem(item, {
+              type: "openSearch",
+              payload: { keyword: item },
+            }),
+        ),
+        createBasicMetadata("status", "状态", [statusText]),
         createBasicMetadata("categories", "分类", []),
-        createBasicMetadata("tags", "标签", []),
+        createMetadataActionList(
+          "tags",
+          "标签",
+          tagList,
+          (item) =>
+            createActionItem(item, {
+              type: "openSearch",
+              payload: { keyword: item },
+            }),
+        ),
         createBasicMetadata("works", "作品", []),
         createBasicMetadata("actors", "角色", []),
       ],
@@ -554,13 +576,17 @@ function buildSearchResult(
 // -- Search --
 
 type SearchApiItem = {
-  bid?: number;
-  bookname?: string;
+  id?: number;
+  name?: string;
   author?: string;
-  adult?: string;
-  status?: string;
-  count?: number;
-  cover?: string;
+  description?: string;
+  tags?: string[];
+  mode?: number;
+  adult?: number;
+  status?: number;
+  views?: number;
+  favorites?: number;
+  rating_sum?: number;
 };
 
 async function searchComic(payload: SearchPayload = {}) {
@@ -580,7 +606,8 @@ async function searchComic(payload: SearchPayload = {}) {
     page: String(page),
   });
 
-  const api = await createApiWretch();
+  const domainGroup = await getDomainGroup();
+  const api = wretch(domainGroup.api).middlewares([loginRetryMiddleware]);
   const res = await api
     .headers({
       "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
@@ -597,28 +624,26 @@ async function searchComic(payload: SearchPayload = {}) {
     throw new Error(String(json.message ?? "搜索失败"));
   }
 
-  console.log(json);
-
-  return buildSearchResult(json, page, payload.extern);
+  return buildSearchResult(json, page, domainGroup.img, payload.extern);
 }
 
 // -- Detail --
 
 type BookApiInfo = {
-  bid?: number;
-  bookname?: string;
-  author?: string;
-  description?: string;
-  adult?: string;
-  status?: string;
-  total_views?: number;
-  likes?: number;
-  comment_total?: number;
-  created_at?: number;
-  updated_at?: number;
-  cover?: string;
-  type?: string;
-  tags?: string[];
+  Bid?: number;
+  Bookname?: string;
+  Author?: string;
+  Description?: string;
+  Adult?: number;
+  Status?: number;
+  Views?: number;
+  Favorites?: number;
+  Time?: number;
+  Ptag?: string;
+  Otag?: string;
+  Pname?: string;
+  publish_year?: string;
+  RatingSUM?: number;
 };
 
 type BookApiChapter = {
@@ -640,6 +665,10 @@ type BookApiResponse = {
     categories?: Array<{ id?: number; name?: string }>;
     data?: Record<string, BookApiChapter[]>;
   };
+  comment?: {
+    count?: number;
+    data?: unknown[];
+  };
 };
 
 async function getComicDetail(payload: ComicDetailPayload = {}) {
@@ -648,7 +677,8 @@ async function getComicDetail(payload: ComicDetailPayload = {}) {
     throw new Error("comicId 不能为空");
   }
 
-  const api = await createApiWretch();
+  const domainGroup = await getDomainGroup();
+  const api = wretch(domainGroup.api).middlewares([loginRetryMiddleware]);
   const res = await api.get(`/api/v4/book/${comicId}`).res();
 
   if (!res.ok) {
@@ -660,23 +690,28 @@ async function getComicDetail(payload: ComicDetailPayload = {}) {
     throw new Error(String(json.message));
   }
 
-  return buildComicDetail(json, comicId, payload.extern);
+  return buildComicDetail(json, comicId, domainGroup.img, payload.extern);
 }
 
 function buildComicDetail(
   json: BookApiResponse,
   comicId: string,
+  baseImg: string,
   ext: Record<string, unknown> | null | undefined,
 ) {
   const info = json.book?.info ?? ({} as BookApiInfo);
-  const title = String(info.bookname ?? "").trim() || `漫画 #${comicId}`;
-  const coverUrl = String(info.cover ?? "").trim();
-  const author = String(info.author ?? "").trim();
-  const statusText = String(info.status ?? "").trim();
-  const description = String(info.description ?? "").trim();
-  const tagList = Array.isArray(info.tags) ? info.tags : [];
-  const typeList = String(info.type ?? "")
-    .split(/[/,，]/g)
+  const title = String(info.Bookname ?? "").trim() || `漫画 #${comicId}`;
+  const coverUrl = comicId ? `${baseImg}/${comicId}/m1.webp` : "";
+  const author = String(info.Author ?? "").trim();
+  const isAdult = info.Adult === 1;
+  const isFinished = info.Status === 0;
+  const statusText = isFinished ? "短篇" : "连载中";
+  const description = String(info.Description ?? "").trim();
+  const tagList = [info.Ptag, info.Otag].filter(
+    (t): t is string => typeof t === "string" && t.trim() !== "",
+  );
+  const typeList = String(info.Ptag ?? "")
+    .split(/[,，、]/g)
     .map((s) => s.trim())
     .filter(Boolean);
 
@@ -717,7 +752,7 @@ function buildComicDetail(
     .filter((item): item is NonNullable<typeof item> => item !== null)
     .sort((a, b) => a.order - b.order);
 
-  const updateText = formatUnixSeconds(info.updated_at);
+  const updateText = formatUnixSeconds(info.Time);
 
   const normal = {
     comicInfo: {
@@ -730,7 +765,7 @@ function buildComicDetail(
       ],
       creator: {
         id: "",
-        name: author,
+        name: "",
         avatar: createImage({
           id: "",
           url: "",
@@ -750,11 +785,36 @@ function buildComicDetail(
         extern: {},
       }),
       metadata: [
-        createMetadataActionList("author", "作者", author ? [author] : []),
-        createMetadataActionList("categories", "分类", typeList),
-        createMetadataActionList("tags", "标签", tagList),
-        createMetadataActionList("works", "作品", []),
-        createMetadataActionList("actors", "角色", []),
+        createMetadataActionList(
+          "author",
+          "作者",
+          author ? [author] : [],
+          (item) =>
+            createActionItem(item, {
+              type: "openSearch",
+              payload: { keyword: item },
+            }),
+        ),
+        createMetadataActionList(
+          "categories",
+          "分类",
+          typeList,
+          (item) =>
+            createActionItem(item, {
+              type: "openSearch",
+              payload: { keyword: item },
+            }),
+        ),
+        createMetadataActionList(
+          "tags",
+          "标签",
+          tagList,
+          (item) =>
+            createActionItem(item, {
+              type: "openSearch",
+              payload: { keyword: item },
+            }),
+        ),
       ].filter((meta) => {
         const value = toStringMap(meta).value;
         return Array.isArray(value) && value.length > 0;
@@ -763,9 +823,9 @@ function buildComicDetail(
     },
     eps,
     recommend: [],
-    totalViews: toNumber(info.total_views, 0),
-    totalLikes: toNumber(info.likes, 0),
-    totalComments: toNumber(info.comment_total, 0),
+    totalViews: toNumber(info.Views, 0),
+    totalLikes: toNumber(info.Favorites, 0),
+    totalComments: toNumber(json.comment?.count, 0),
     isFavourite: false,
     isLiked: false,
     allowComments: false,
@@ -1011,14 +1071,10 @@ async function getSettingsBundle(): Promise<SettingsBundleContract> {
     loadAuthPassword(),
   ]);
 
-  const domainGroup = await loadAndNormalizeConfigString(
-    DOMAIN_GROUP_CONFIG_KEY,
-    "2",
-  );
+  const domainGroup = await readConfigValue(DOMAIN_GROUP_CONFIG_KEY, "2");
+  const allowAdult = await readConfigValue(ALLOW_ADULT_CONFIG_KEY, "both");
 
-  console.log("allowAdult", await cache.get(ALLOW_ADULT_CONFIG_KEY, "false"));
-
-  return {
+  const data = {
     source: PLUGIN_ID,
     scheme: {
       version: "1.0.0",
@@ -1064,9 +1120,14 @@ async function getSettingsBundle(): Promise<SettingsBundleContract> {
           fields: [
             {
               key: ALLOW_ADULT_CONFIG_KEY,
-              kind: "switch",
-              label: "过滤成人内容",
+              kind: "choice",
+              label: "年龄限制",
               fnPath: "setAllowAdult",
+              options: [
+                { label: "所有", value: "both" },
+                { label: "仅全年龄", value: "false" },
+                { label: "仅限制级", value: "true" },
+              ],
             },
           ],
         },
@@ -1078,11 +1139,12 @@ async function getSettingsBundle(): Promise<SettingsBundleContract> {
         [AUTH_ACCOUNT_CONFIG_KEY]: account,
         [AUTH_PASSWORD_CONFIG_KEY]: password,
         [DOMAIN_GROUP_CONFIG_KEY]: domainGroup,
-        [ALLOW_ADULT_CONFIG_KEY]:
-          String(cache.getSync(ALLOW_ADULT_CONFIG_KEY, "false")) === "false",
+        [ALLOW_ADULT_CONFIG_KEY]: allowAdult,
       },
     },
   };
+
+  return data as SettingsBundleContract;
 }
 
 // -- Init --

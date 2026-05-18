@@ -100,6 +100,7 @@ export interface BridgeApi {
     input: Uint8Array | ArrayBuffer | ArrayBufferView | number[],
   ): Promise<number[]>;
   call(name: string, ...args: unknown[]): Promise<unknown>;
+  callSync(name: string, ...args: unknown[]): unknown;
 }
 
 export interface HostRuntimeApi {

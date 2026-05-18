@@ -2,11 +2,11 @@ export const cache = {
   get: (key: string, fallback: unknown = null): Promise<unknown> =>
     bridge.call("cache.get", key, fallback),
   getSync: (key: string, fallback: unknown = null): unknown =>
-    bridge.call("cache.get.sync", key, fallback),
+    bridge.callSync("cache.get.sync", key, fallback),
   set: (key: string, value: unknown) =>
     bridge.call("cache.set", key, value) as Promise<boolean>,
   setSync: (key: string, value: unknown) =>
-    bridge.call("cache.set.sync", key, value) as Promise<boolean>,
+    bridge.callSync("cache.set.sync", key, value) as Promise<boolean>,
   setIfAbsent: (key: string, value: unknown) =>
     bridge.call("cache.set_if_absent", key, value) as Promise<boolean>,
   compareAndSet: (key: string, expected: unknown, next: unknown) =>
