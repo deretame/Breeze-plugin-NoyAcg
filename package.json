@@ -1,0 +1,24 @@
+{
+  "name": "noy-acg",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@10.27.0",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "pnpm typecheck && node --import tsx build/generate-manifest.ts && cross-env NODE_OPTIONS=\"--import tsx\" rspack build && node --import tsx build/generate-brotli.ts",
+    "dev": "pnpm dev:serve",
+    "dev:serve": "tsx dev-server.ts"
+  },
+  "dependencies": {
+    "wretch": "^3.0.7"
+  },
+  "devDependencies": {
+    "@rspack/cli": "^2.0.1",
+    "@rspack/core": "^2.0.1",
+    "@types/node": "^25.6.0",
+    "cross-env": "^10.1.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3"
+  }
+}
