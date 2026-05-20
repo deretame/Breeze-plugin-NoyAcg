@@ -538,15 +538,11 @@ function buildSearchResult(
         ),
         createBasicMetadata("status", "状态", [statusText]),
         createBasicMetadata("categories", "分类", []),
-        createMetadataActionList(
-          "tags",
-          "标签",
-          tagList,
-          (item) =>
-            createActionItem(item, {
-              type: "openSearch",
-              payload: { keyword: item },
-            }),
+        createMetadataActionList("tags", "标签", tagList, (item) =>
+          createActionItem(item, {
+            type: "openSearch",
+            payload: { keyword: item },
+          }),
         ),
         createBasicMetadata("works", "作品", []),
         createBasicMetadata("actors", "角色", []),
@@ -739,7 +735,7 @@ function buildComicDetail(
           logicalKey: id,
           storageChapterId: id,
           name: categoryName ? `${categoryName}—${name}` : name,
-          order: toNumber(chapter.sort, orderCount++),
+          order: orderCount++,
           extern: {
             pageCount,
             categoryId,
@@ -781,7 +777,7 @@ function buildComicDetail(
         id: comicId,
         url: coverUrl || NOT_FOUND_IMAGE_URL,
         name: `${comicId}.webp`,
-        path: `comic/${comicId}/cover.webp`,
+        path: `cover.webp`,
         extern: {},
       }),
       metadata: [
@@ -795,25 +791,17 @@ function buildComicDetail(
               payload: { keyword: item },
             }),
         ),
-        createMetadataActionList(
-          "categories",
-          "分类",
-          typeList,
-          (item) =>
-            createActionItem(item, {
-              type: "openSearch",
-              payload: { keyword: item },
-            }),
+        createMetadataActionList("categories", "分类", typeList, (item) =>
+          createActionItem(item, {
+            type: "openSearch",
+            payload: { keyword: item },
+          }),
         ),
-        createMetadataActionList(
-          "tags",
-          "标签",
-          tagList,
-          (item) =>
-            createActionItem(item, {
-              type: "openSearch",
-              payload: { keyword: item },
-            }),
+        createMetadataActionList("tags", "标签", tagList, (item) =>
+          createActionItem(item, {
+            type: "openSearch",
+            payload: { keyword: item },
+          }),
         ),
       ].filter((meta) => {
         const value = toStringMap(meta).value;
@@ -915,6 +903,7 @@ async function getReadSnapshot(payload: ReadSnapshotPayload = {}) {
   const detail = await getComicDetail({ comicId, extern: payload.extern });
   const normal = toStringMap(toStringMap(detail.data).normal);
   const comicInfo = toStringMap(normal.comicInfo);
+  let epsOrder = 1;
   const eps = (Array.isArray(normal.eps) ? normal.eps : [])
     .map((item) => toStringMap(item))
     .map((item) => ({
@@ -923,7 +912,7 @@ async function getReadSnapshot(payload: ReadSnapshotPayload = {}) {
       logicalKey: String(item.logicalKey ?? item.id ?? "").trim(),
       storageChapterId: String(item.storageChapterId ?? item.id ?? "").trim(),
       name: String(item.name ?? "").trim(),
-      order: toNumber(item.order, 0),
+      order: epsOrder++,
       extern: toStringMap(item.extern),
     }))
     .filter((item) => item.id);
@@ -949,7 +938,7 @@ async function getReadSnapshot(payload: ReadSnapshotPayload = {}) {
   const pages = Array.from({ length: Math.max(1, pageCount) }, (_, i) => {
     const page = i + 1;
     const name = `${page}.webp`;
-    const path = `comic/${comicId}/${targetChapter.id}/${page}.webp`;
+    const path = `${page}.webp`;
     const url = `${base.img}/${comicId}/${targetChapter.id}/${page}.webp`;
     return {
       id: `${targetChapter.id}-${page}`,
@@ -970,7 +959,7 @@ async function getReadSnapshot(payload: ReadSnapshotPayload = {}) {
     extern: item.extern,
   }));
 
-  return {
+  const data = {
     source: PLUGIN_ID,
     extern: payload.extern ?? null,
     data: {
@@ -1012,6 +1001,10 @@ async function getReadSnapshot(payload: ReadSnapshotPayload = {}) {
       chapters,
     },
   };
+
+  console.debug("fetchComicDetail data", data);
+
+  return data;
 }
 
 // -- Fetch image --

@@ -4,15 +4,17 @@ export function buildPluginInfo() {
   return {
     name: "NoyAcg",
     uuid: PLUGIN_ID,
-    iconUrl: "https://img.noy.asia/favicon.ico",
+    iconUrl:
+      "https://raw.githubusercontent.com/deretame/Breeze-plugin-NoyAcg/main/assets/ic_launcher_foreground.webp",
     creator: {
       name: "",
       describe: "",
     },
-    describe: "NoyAcg / NoyManga 漫画插件",
-    version: "0.1.0",
-    home: "https://noy.asia",
-    updateUrl: "",
+    describe: "NoyAcg 插件",
+    version: "0.0.1",
+    home: "https://github.com/deretame/Breeze-plugin-NoyAcg",
+    updateUrl:
+      "https://api.github.com/repos/deretame/Breeze-plugin-NoyAcg/releases/latest",
     function: [],
   };
 }
