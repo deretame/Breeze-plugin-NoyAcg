@@ -593,9 +593,11 @@ async function searchComic(payload: SearchPayload = {}) {
     throw new Error("keyword 不能为空");
   }
 
+  const mode = String(payload.extern?.mode ?? "default");
+
   const formData = new URLSearchParams({
     value: keyword,
-    mode: "default",
+    mode: mode,
     sort: "time",
     type: "all",
     finished: "",
@@ -630,6 +632,7 @@ type BookApiInfo = {
   Bookname?: string;
   Author?: string;
   Description?: string;
+  Len: number;
   Adult?: number;
   Status?: number;
   Views?: number;
@@ -703,11 +706,16 @@ function buildComicDetail(
   const isFinished = info.Status === 0;
   const statusText = isFinished ? "短篇" : "连载中";
   const description = String(info.Description ?? "").trim();
-  const tagList = [info.Ptag, info.Otag].filter(
-    (t): t is string => typeof t === "string" && t.trim() !== "",
-  );
+  const originList = String(info.Otag ?? "")
+    .split(/ +/g)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const roleList = String(info.Pname ?? "")
+    .split(/ +/g)
+    .map((s) => s.trim())
+    .filter(Boolean);
   const typeList = String(info.Ptag ?? "")
-    .split(/[,，、]/g)
+    .split(/ +/g)
     .map((s) => s.trim())
     .filter(Boolean);
 
@@ -748,6 +756,23 @@ function buildComicDetail(
     .filter((item): item is NonNullable<typeof item> => item !== null)
     .sort((a, b) => a.order - b.order);
 
+  if (eps.length === 0) {
+    eps.push({
+      id: "noChapterInfo",
+      requestId: "noChapterInfo",
+      logicalKey: "noChapterInfo",
+      storageChapterId: "noChapterInfo",
+      name: "第一章",
+      order: 1,
+      extern: {
+        pageCount: Math.max(1, toNumber(info.Len, 1)),
+        categoryId: "",
+        categoryName: "",
+        createdAt: 0,
+      },
+    });
+  }
+
   const updateText = formatUnixSeconds(info.Time);
 
   const normal = {
@@ -758,6 +783,9 @@ function buildComicDetail(
         createActionItem(`状态：${statusText || "未知"}`),
         createActionItem(`更新时间：${updateText || "未知"}`),
         createActionItem(`章节数：${eps.length}`),
+        createActionItem(`页数：${info.Len}`),
+        createActionItem(`观看量：${info.Views || 0}`),
+        createActionItem(`评分：${((info?.RatingSUM ?? 0) / 2).toFixed(1)}`),
       ],
       creator: {
         id: "",
@@ -788,19 +816,25 @@ function buildComicDetail(
           (item) =>
             createActionItem(item, {
               type: "openSearch",
-              payload: { keyword: item },
+              payload: { keyword: item, extern: { mode: "author" } },
             }),
         ),
         createMetadataActionList("categories", "分类", typeList, (item) =>
           createActionItem(item, {
             type: "openSearch",
-            payload: { keyword: item },
+            payload: { keyword: item, extern: { mode: "tag" } },
           }),
         ),
-        createMetadataActionList("tags", "标签", tagList, (item) =>
+        createMetadataActionList("roles", "角色", roleList, (item) =>
           createActionItem(item, {
             type: "openSearch",
-            payload: { keyword: item },
+            payload: { keyword: item, extern: { mode: "tag" } },
+          }),
+        ),
+        createMetadataActionList("origins", "原作", originList, (item) =>
+          createActionItem(item, {
+            type: "openSearch",
+            payload: { keyword: item, extern: { mode: "tag" } },
           }),
         ),
       ].filter((meta) => {
@@ -856,11 +890,12 @@ async function getChapter(payload: ChapterPayload = {}) {
     String(extern.chapterName ?? "").trim() || `章节 ${chapterId}`;
 
   const base = await getDomainGroup();
+  const chapterSegment = chapterId === "noChapterInfo" ? "" : `/${chapterId}`;
   const pages = Array.from({ length: Math.max(1, pageCount || 1) }, (_, i) => {
     const page = i + 1;
     const name = `${page}.webp`;
-    const path = `comic/${comicId}/${chapterId}/${page}.webp`;
-    const url = `${base.img}/${comicId}/${chapterId}/${page}.webp`;
+    const path = `comic/${comicId}${chapterSegment}/${page}.webp`;
+    const url = `${base.img}/${comicId}${chapterSegment}/${page}.webp`;
     return {
       id: `${chapterId}-${page}`,
       name,
@@ -935,11 +970,13 @@ async function getReadSnapshot(payload: ReadSnapshotPayload = {}) {
 
   const base = await getDomainGroup();
   const pageCount = toNumber(targetChapter.extern.pageCount, 1);
+  const chapterSegment =
+    targetChapter.id === "noChapterInfo" ? "" : `/${targetChapter.id}`;
   const pages = Array.from({ length: Math.max(1, pageCount) }, (_, i) => {
     const page = i + 1;
     const name = `${page}.webp`;
     const path = `${page}.webp`;
-    const url = `${base.img}/${comicId}/${targetChapter.id}/${page}.webp`;
+    const url = `${base.img}/${comicId}${chapterSegment}/${page}.webp`;
     return {
       id: `${targetChapter.id}-${page}`,
       name,
@@ -1001,8 +1038,6 @@ async function getReadSnapshot(payload: ReadSnapshotPayload = {}) {
       chapters,
     },
   };
-
-  console.debug("fetchComicDetail data", data);
 
   return data;
 }
