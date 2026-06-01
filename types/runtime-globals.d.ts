@@ -59,25 +59,6 @@ export interface NativeApi {
   free(id: number): Promise<void>;
 }
 
-export interface WasiRunResult {
-  exitCode: number;
-  stdoutId: number;
-  stderrId: number;
-}
-
-export interface WasiApi {
-  run(
-    moduleBytes: Uint8Array,
-    options?: { stdinId?: number; args?: string[]; reuseModule?: boolean },
-  ): Promise<WasiRunResult>;
-  runById(
-    moduleId: number,
-    options?: { stdinId?: number; args?: string[]; reuseModule?: boolean },
-  ): Promise<WasiRunResult>;
-  takeStdout(result: WasiRunResult): Promise<Uint8Array>;
-  takeStderr(result: WasiRunResult): Promise<Uint8Array>;
-}
-
 export interface BridgeApi {
   gzipDecompress(
     input: Uint8Array | ArrayBuffer | ArrayBufferView | number[],
@@ -86,10 +67,48 @@ export interface BridgeApi {
     input: Uint8Array | ArrayBuffer | ArrayBufferView | number[],
   ): Promise<Uint8Array>;
   call(name: "crypto.md5_hex", input: string): Promise<string>;
+  call(name: "crypto.sha1_hex", input: string): Promise<string>;
+  call(name: "crypto.sha512_hex", input: string): Promise<string>;
+  call(
+    name: "crypto.hmac_sha1_hex",
+    key: string,
+    input: string,
+  ): Promise<string>;
+  call(
+    name: "crypto.hmac_sha512_hex",
+    key: string,
+    input: string,
+  ): Promise<string>;
   call(
     name: "crypto.aes_ecb_pkcs7_decrypt_b64",
     payloadB64: string,
     keyRaw: string,
+  ): Promise<string>;
+  call(
+    name: "crypto.aes_cbc_pkcs7_encrypt_b64",
+    payloadB64: string,
+    keyRaw: string,
+    ivRaw: string,
+  ): Promise<string>;
+  call(
+    name: "crypto.aes_cbc_pkcs7_decrypt_b64",
+    payloadB64: string,
+    keyRaw: string,
+    ivRaw: string,
+  ): Promise<string>;
+  call(
+    name: "crypto.aes_gcm_encrypt_b64",
+    payloadB64: string,
+    keyRaw: string,
+    nonceRaw: string,
+    aadB64?: string | null,
+  ): Promise<string>;
+  call(
+    name: "crypto.aes_gcm_decrypt_b64",
+    payloadB64: string,
+    keyRaw: string,
+    nonceRaw: string,
+    aadB64?: string | null,
   ): Promise<string>;
   call(
     name: "compression.gzip_decompress",
@@ -106,6 +125,59 @@ export interface BridgeApi {
 export interface HostRuntimeApi {
   bridge: BridgeApi;
   [key: string]: unknown;
+}
+
+export interface RuntimeFacadeApi extends HostRuntimeApi {
+  fs: FsApi;
+  FSError: new (message?: string, code?: string, path?: string) => Error;
+  native: NativeApi;
+  path: PathApi;
+  nodeCryptoCompat: CryptoApi;
+  uuidv4: () => string;
+  mathAdd(a: number, b: number): Promise<number>;
+  nativePut(input: Uint8Array): Promise<number>;
+  nativeTake(id: number): Promise<Uint8Array>;
+  nativeExec(
+    op: string,
+    inputId: number,
+    args?: unknown,
+    extraInputId?: Uint8Array | number,
+  ): Promise<number>;
+  md5Hex(input: string): Promise<string>;
+  sha1Hex(input: string): Promise<string>;
+  sha512Hex(input: string): Promise<string>;
+  hmacSha1Hex(key: string, input: string): Promise<string>;
+  hmacSha512Hex(key: string, input: string): Promise<string>;
+  aesEcbPkcs7DecryptB64(payloadB64: string, keyRaw: string): Promise<string>;
+  aesCbcPkcs7EncryptB64(
+    payloadB64: string,
+    keyRaw: string,
+    ivRaw: string,
+  ): Promise<string>;
+  aesCbcPkcs7DecryptB64(
+    payloadB64: string,
+    keyRaw: string,
+    ivRaw: string,
+  ): Promise<string>;
+  aesGcmEncryptB64(
+    payloadB64: string,
+    keyRaw: string,
+    nonceRaw: string,
+    aadB64?: string | null,
+  ): Promise<string>;
+  aesGcmDecryptB64(
+    payloadB64: string,
+    keyRaw: string,
+    nonceRaw: string,
+    aadB64?: string | null,
+  ): Promise<string>;
+  gzipCompress(
+    input: Uint8Array | ArrayBuffer | ArrayBufferView | number[],
+  ): Promise<Uint8Array>;
+  gzipDecompress(
+    input: Uint8Array | ArrayBuffer | ArrayBufferView | number[],
+  ): Promise<Uint8Array>;
+  bridgeCall(name: string, ...args: unknown[]): Promise<unknown>;
 }
 
 export interface CryptoHash {
@@ -139,7 +211,6 @@ declare global {
   var fs: FsApi | undefined;
   var path: PathApi | undefined;
   var native: NativeApi;
-  var wasi: WasiApi;
   var bridge: BridgeApi;
   var nodeCryptoCompat: CryptoApi;
   var uuidv4: () => string;

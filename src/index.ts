@@ -11,6 +11,13 @@ import {
 } from "./common";
 import { buildPluginInfo } from "./get-info";
 import { cache, flutterTools, pluginConfig } from "./tools";
+import type {
+  ChapterContentContract,
+  ChapterWithPages,
+  ComicDetailContract,
+  ReadSnapshotContract,
+  SearchResultContract,
+} from "../types/type";
 
 type BasePayload = {
   extern?: Record<string, unknown>;
@@ -39,6 +46,8 @@ type ReadSnapshotPayload = {
 type FetchImagePayload = {
   url?: string;
   timeoutMs?: number;
+  taskGroupKey?: string;
+  extern?: Record<string, unknown>;
 };
 
 type LoginPayload = {
@@ -558,8 +567,8 @@ function buildSearchResult(
     source: PLUGIN_ID,
     extern: ext ?? null,
     scheme: {
-      version: "1.0.0",
-      type: "searchResult",
+      version: "1.0.0" as const,
+      type: "searchResult" as const,
       source: PLUGIN_ID,
       list: "comicGrid",
     },
@@ -585,7 +594,9 @@ type SearchApiItem = {
   rating_sum?: number;
 };
 
-async function searchComic(payload: SearchPayload = {}) {
+async function searchComic(
+  payload: SearchPayload = {},
+): Promise<SearchResultContract> {
   const extern = toStringMap(payload.extern);
   const page = Math.max(1, Number(payload.page ?? 1) || 1);
   const keyword = String(payload.keyword ?? extern.keyword ?? "").trim();
@@ -670,7 +681,9 @@ type BookApiResponse = {
   };
 };
 
-async function getComicDetail(payload: ComicDetailPayload = {}) {
+async function getComicDetail(
+  payload: ComicDetailPayload = {},
+): Promise<ComicDetailContract> {
   const comicId = String(payload.comicId ?? "").trim();
   if (!comicId) {
     throw new Error("comicId 不能为空");
@@ -858,8 +871,8 @@ function buildComicDetail(
   };
 
   const scheme = {
-    version: "1.0.0",
-    type: "comicDetail",
+    version: "1.0.0" as const,
+    type: "comicDetail" as const,
     source: PLUGIN_ID,
   };
 
@@ -877,7 +890,9 @@ function buildComicDetail(
 
 // -- Chapter (no API call, just construct image URLs) --
 
-async function getChapter(payload: ChapterPayload = {}) {
+async function getChapter(
+  payload: ChapterPayload = {},
+): Promise<ChapterContentContract> {
   const extern = toStringMap(payload.extern);
   const comicId = String(payload.comicId ?? extern.comicId ?? "").trim();
   const chapterId = String(payload.chapterId ?? extern.chapterId ?? "").trim();
@@ -905,13 +920,15 @@ async function getChapter(payload: ChapterPayload = {}) {
     };
   });
 
-  const chapter = {
-    epId: chapterId,
-    epName: chapterName,
-    length: pages.length,
-    epPages: String(pages.length),
-    docs: pages,
-    series: [],
+  const chapter: ChapterWithPages = {
+    id: chapterId,
+    requestId: "",
+    logicalKey: "",
+    storageChapterId: "",
+    name: chapterName,
+    order: Number(chapterId),
+    pages,
+    extern: {},
   };
 
   return {
@@ -920,18 +937,28 @@ async function getChapter(payload: ChapterPayload = {}) {
     chapterId,
     extern: payload.extern ?? null,
     scheme: {
-      version: "1.0.0",
-      type: "chapterContent",
+      version: "1.0.0" as const,
+      type: "chapterContent" as const,
       source: PLUGIN_ID,
     },
-    data: { chapter },
-    chapter,
+    data: {
+      comic: {
+        id: comicId,
+        source: PLUGIN_ID,
+        title: chapterName,
+        extern: {},
+      },
+      chapter,
+      chapters: [],
+    },
   };
 }
 
 // -- Read snapshot --
 
-async function getReadSnapshot(payload: ReadSnapshotPayload = {}) {
+async function getReadSnapshot(
+  payload: ReadSnapshotPayload = {},
+): Promise<ReadSnapshotContract> {
   const comicId = String(payload.comicId ?? "").trim();
   if (!comicId) throw new Error("comicId 不能为空");
 
@@ -1004,25 +1031,6 @@ async function getReadSnapshot(payload: ReadSnapshotPayload = {}) {
         id: String(comicInfo.id ?? comicId),
         source: PLUGIN_ID,
         title: String(comicInfo.title ?? ""),
-        description: String(comicInfo.description ?? ""),
-        cover: {
-          ...toStringMap(comicInfo.cover),
-          extern: toStringMap(toStringMap(comicInfo.cover).extern),
-        },
-        creator: {
-          ...toStringMap(comicInfo.creator),
-          avatar: {
-            ...toStringMap(toStringMap(comicInfo.creator).avatar),
-            extern: toStringMap(
-              toStringMap(toStringMap(comicInfo.creator).avatar).extern,
-            ),
-          },
-          extern: toStringMap(toStringMap(comicInfo.creator).extern),
-        },
-        titleMeta: Array.isArray(comicInfo.titleMeta)
-          ? comicInfo.titleMeta
-          : [],
-        metadata: Array.isArray(comicInfo.metadata) ? comicInfo.metadata : [],
         extern: toStringMap(comicInfo.extern),
       },
       chapter: {
@@ -1047,7 +1055,9 @@ async function getReadSnapshot(payload: ReadSnapshotPayload = {}) {
 async function fetchImageBytes({
   url = "",
   timeoutMs = 30000,
-}: FetchImagePayload = {}) {
+  taskGroupKey = "",
+  extern = {},
+}: FetchImagePayload = {}): Promise<Uint8Array<ArrayBufferLike>> {
   const targetUrl = String(url).trim();
   if (!targetUrl) {
     throw new Error("url 不能为空");
@@ -1105,7 +1115,7 @@ async function getSettingsBundle(): Promise<SettingsBundleContract> {
   const data = {
     source: PLUGIN_ID,
     scheme: {
-      version: "1.0.0",
+      version: "1.0.0" as const,
       type: "settings",
       sections: [
         {
@@ -1208,7 +1218,7 @@ async function init() {
   };
 }
 
-async function getInfo() {
+async function getInfo(): Promise<ReturnType<typeof buildPluginInfo>> {
   return buildPluginInfo();
 }
 
