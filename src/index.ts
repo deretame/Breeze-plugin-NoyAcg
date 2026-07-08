@@ -1,3 +1,11 @@
+import type {
+  ChapterContentContract,
+  ChapterWithPages,
+  ComicDetailContract,
+  ReadSnapshotContract,
+  SearchResultContract,
+} from "breeze-plugin-kit";
+import { cache, flutterTools, pluginConfig } from "breeze-plugin-kit";
 import wretch, { type ConfiguredMiddleware } from "wretch";
 import {
   NOT_FOUND_IMAGE_URL,
@@ -10,14 +18,6 @@ import {
   toStringMap,
 } from "./common";
 import { buildPluginInfo } from "./get-info";
-import { cache, flutterTools, pluginConfig } from "./tools";
-import type {
-  ChapterContentContract,
-  ChapterWithPages,
-  ComicDetailContract,
-  ReadSnapshotContract,
-  SearchResultContract,
-} from "../types/type";
 
 type BasePayload = {
   extern?: Record<string, unknown>;

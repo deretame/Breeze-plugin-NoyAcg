@@ -2,7 +2,7 @@ export const PLUGIN_ID = "babe7021-2df8-4abc-bba8-00bbfd7a0f75";
 export const NOT_FOUND_IMAGE_URL = "";
 export const PLACEHOLDER_IMAGE_PATH = "placeholder/image-404.png";
 
-import type { ActionItem, MetadataListItem } from "../types/type";
+import type { ActionItem, MetadataListItem } from "breeze-plugin-kit";
 
 export function toStringMap(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -72,7 +72,7 @@ export function createBasicMetadata(
     value: list
       .map((item) => String(item ?? "").trim())
       .filter(Boolean)
-      .map((item) => ({ name: item, onTap: {}, extern: {} } as ActionItem)),
+      .map((item) => ({ name: item, onTap: {}, extern: {} }) as ActionItem),
   };
 }
 
@@ -165,5 +165,5 @@ type PlainField = BaseField & {
 
 type SettingsField = OptionField | PlainField;
 
-import type { SettingsBundleContract } from "../types/type";
+import type { SettingsBundleContract } from "breeze-plugin-kit";
 export type { SettingsBundleContract };

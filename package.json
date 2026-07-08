@@ -13,6 +13,7 @@
     "dev:serve": "tsx dev-server.ts"
   },
   "dependencies": {
+    "breeze-plugin-kit": "^0.3.0",
     "wretch": "^3.0.7"
   },
   "devDependencies": {
