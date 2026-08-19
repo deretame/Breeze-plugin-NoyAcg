@@ -1,8 +1,8 @@
 {
   "name": "breeze-plugin-noy-acg",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "type": "module",
-  "packageManager": "pnpm@10.27.0",
+  "packageManager": "pnpm@11.11.0",
   "files": [
     "dist"
   ],

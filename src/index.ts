@@ -125,13 +125,23 @@ const loginRetryMiddleware: ConfiguredMiddleware =
       return response;
     }
 
-    // Check for login-required status
+    // Check for login-required status. Breeze stores HTTP response bodies in
+    // native buffers, which currently cannot be cloned. Read the body once
+    // and rebuild the response so the caller can still consume it later.
     let json: Record<string, unknown> | null = null;
+    const bodyText = await response.text();
     try {
-      const clone = response.clone();
-      json = (await clone.json()) as Record<string, unknown>;
+      json = JSON.parse(bodyText) as Record<string, unknown>;
     } catch {
       // non-JSON body, skip login check
+    }
+
+    if (!json || json.status !== "login") {
+      response = new Response(bodyText, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
     }
 
     if (json && json.status === "login") {

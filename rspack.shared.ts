@@ -1,5 +1,5 @@
-import { resolve } from "node:path";
 import type { Configuration } from "@rspack/core";
+import { resolve } from "node:path";
 
 export type CreateRspackConfigOptions = {
   rootDir: string;
@@ -16,7 +16,7 @@ export function createRspackConfig({
     mode: "production",
     entry: `${rootDir}/src/index.ts`,
     target: "web",
-    devtool: false,
+    devtool: "inline-source-map",
     module: {
       rules: [
         {
