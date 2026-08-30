@@ -12,7 +12,7 @@ export function buildPluginInfo(): InfoContract {
       describe: "",
     },
     describe: "NoyAcg 插件",
-    version: "0.0.4",
+    version: "0.0.5",
     home: "https://github.com/deretame/Breeze-plugin-NoyAcg",
     updateUrl:
       "https://api.github.com/repos/deretame/Breeze-plugin-NoyAcg/releases/latest",
