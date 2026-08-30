@@ -13,8 +13,8 @@
     "dev:serve": "tsx dev-server.ts"
   },
   "dependencies": {
-    "breeze-plugin-kit": "^0.3.0",
-    "wretch": "^3.0.7"
+    "axios": "^1.20.0",
+    "breeze-plugin-kit": "^0.6.0"
   },
   "devDependencies": {
     "@rspack/cli": "^2.0.1",

@@ -1,23 +1,48 @@
 import type {
+  AdvancedSearchContract,
   ChapterContentContract,
   ChapterWithPages,
   ComicDetailContract,
+  ComicListSceneBundleContract,
+  ComicPagedListContract,
+  CommentFeedContract,
+  CommentItem,
+  CommentRepliesContract,
+  FilterBundleContract,
+  FunctionPageActionGridItem,
+  FunctionPageChipItem,
+  FunctionPageContract,
   ReadSnapshotContract,
   SearchResultContract,
+  ToggleFavoriteResult,
+  UserInfoBundleContract,
 } from "breeze-plugin-kit";
 import { cache, flutterTools, pluginConfig } from "breeze-plugin-kit";
-import wretch, { type ConfiguredMiddleware } from "wretch";
 import {
-  NOT_FOUND_IMAGE_URL,
-  PLUGIN_ID,
-  SettingsBundleContract,
   createActionItem,
   createBasicMetadata,
   createImage,
   createMetadataActionList,
+  NOT_FOUND_IMAGE_URL,
+  PLACEHOLDER_IMAGE_PATH,
+  PLUGIN_ID,
+  SettingsBundleContract,
   toStringMap,
 } from "./common";
 import { buildPluginInfo } from "./get-info";
+import {
+  BASE_GROUPS,
+  clearStoredCookies,
+  DOMAIN_GROUP_CONFIG_KEY,
+  getDomainGroup,
+  getResponseJson,
+  noyApi,
+  requireApiPayloadString,
+  saveCookieStore,
+  setAutoLoginHandler,
+  type RawApiPayload,
+  type RawApiResult,
+} from "./request";
 
 type BasePayload = {
   extern?: Record<string, unknown>;
@@ -57,22 +82,12 @@ type LoginPayload = {
   persistCredentials?: boolean;
 };
 
-const BASE_GROUPS = [
-  { api: "https://api.noymanga.com", img: "https://img.noymanga.com" },
-  { api: "https://api.noyteam.online", img: "https://img.noyteam.online" },
-  { api: "https://api.noy.asia", img: "https://img.noy.asia" },
-];
-
 const AUTH_ACCOUNT_CONFIG_KEY = "auth.account";
 const AUTH_PASSWORD_CONFIG_KEY = "auth.password";
-const AUTH_COOKIES_CONFIG_KEY = "auth.cookies";
 const ALLOW_ADULT_CONFIG_KEY = "search.allowAdult";
-const DOMAIN_GROUP_CONFIG_KEY = "network.domainGroup";
 const AUTH_CREDENTIALS_REQUIRED_ERROR =
   "[AUTH_CREDENTIALS_REQUIRED] 账号或密码不能为空，请先在设置中填写";
 
-let cookieStore: Map<string, string> = new Map();
-let cookieStoreLoaded = false;
 let loginInFlight: Promise<string> | null = null;
 let noyInitStarted = false;
 
@@ -80,104 +95,9 @@ async function persistConfigValue(key: string, value: string) {
   await Promise.all([cache.set(key, value), saveConfigString(key, value)]);
 }
 
-function readConfigValueSync(key: string, fallback: string): string {
-  return String(cache.getSync(key, fallback));
-}
-
 async function readConfigValue(key: string, fallback: string): Promise<string> {
   return await loadAndNormalizeConfigString(key, fallback);
 }
-
-function getDefaultHeadersSync() {
-  const headers: Record<string, string> = {
-    "User-Agent": "NoyAcg/3.0",
-    "allow-adult": readConfigValueSync(ALLOW_ADULT_CONFIG_KEY, "both"),
-    Accept: "application/json, text/plain, */*",
-  };
-  const cookie = getCookieHeader();
-  if (cookie) {
-    headers.Cookie = cookie;
-  }
-  return headers;
-}
-
-const loginRetryMiddleware: ConfiguredMiddleware =
-  (next) => async (url, opts) => {
-    await loadCookieStore();
-    const mergedOpts = {
-      ...opts,
-      headers: {
-        ...getDefaultHeadersSync(),
-        ...((opts.headers as Record<string, string>) || {}),
-      },
-    };
-
-    let response = await next(url, mergedOpts);
-    updateCookiesFromResponse(response);
-
-    // Don't intercept login endpoint or non-JSON responses
-    if (url.includes("/api/login")) {
-      return response;
-    }
-
-    const contentType = response.headers.get("content-type") ?? "";
-    if (!contentType.includes("json")) {
-      return response;
-    }
-
-    // Check for login-required status. Breeze stores HTTP response bodies in
-    // native buffers, which currently cannot be cloned. Read the body once
-    // and rebuild the response so the caller can still consume it later.
-    let json: Record<string, unknown> | null = null;
-    const bodyText = await response.text();
-    try {
-      json = JSON.parse(bodyText) as Record<string, unknown>;
-    } catch {
-      // non-JSON body, skip login check
-    }
-
-    if (!json || json.status !== "login") {
-      response = new Response(bodyText, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: response.headers,
-      });
-    }
-
-    if (json && json.status === "login") {
-      await tryAutoLogin("api");
-      // Retry once with fresh cookies
-      const retryOpts = {
-        ...opts,
-        headers: {
-          ...getDefaultHeadersSync(),
-          ...((opts.headers as Record<string, string>) || {}),
-        },
-      };
-      response = await next(url, retryOpts);
-      updateCookiesFromResponse(response);
-    }
-
-    return response;
-  };
-
-async function getDomainGroup() {
-  try {
-    const raw = await readConfigValue(DOMAIN_GROUP_CONFIG_KEY, "2");
-    const index = Number(raw);
-    return BASE_GROUPS[
-      Number.isFinite(index) && index >= 0 && index <= 2 ? index : 2
-    ];
-  } catch {
-    return BASE_GROUPS[2];
-  }
-}
-
-async function createApiWretch() {
-  const base = await getDomainGroup();
-  return wretch(base.api).middlewares([loginRetryMiddleware]);
-}
-
 function decodeConfigString(raw: unknown, fallback = "") {
   if (raw === undefined || raw === null) {
     return fallback;
@@ -247,60 +167,6 @@ async function loadAuthPassword() {
   return await readConfigValue(AUTH_PASSWORD_CONFIG_KEY, "");
 }
 
-async function loadCookieStore() {
-  if (cookieStoreLoaded) {
-    return;
-  }
-  try {
-    const raw = await pluginConfig.load(AUTH_COOKIES_CONFIG_KEY, "{}");
-    const obj = JSON.parse(String(raw ?? "{}"));
-    if (obj && typeof obj === "object" && !Array.isArray(obj)) {
-      for (const [key, value] of Object.entries(obj)) {
-        if (typeof value === "string" && key) {
-          cookieStore.set(key, value);
-        }
-      }
-    }
-  } catch {
-    // ignore
-  }
-  cookieStoreLoaded = true;
-}
-
-async function saveCookieStore() {
-  const obj: Record<string, string> = {};
-  for (const [key, value] of cookieStore.entries()) {
-    obj[key] = value;
-  }
-  await pluginConfig.save(AUTH_COOKIES_CONFIG_KEY, JSON.stringify(obj));
-}
-
-function updateCookiesFromResponse(res: Response) {
-  const setCookieHeaders: string[] = [];
-  const headers = res.headers as Headers & { getSetCookie?: () => string[] };
-  if (typeof headers.getSetCookie === "function") {
-    setCookieHeaders.push(...headers.getSetCookie());
-  } else {
-    const single = headers.get("set-cookie");
-    if (single) setCookieHeaders.push(single);
-  }
-  for (const header of setCookieHeaders) {
-    if (!header) continue;
-    const first = header.split(";")[0];
-    const eq = first.indexOf("=");
-    if (eq <= 0) continue;
-    const name = first.slice(0, eq).trim();
-    const value = first.slice(eq + 1).trim();
-    if (!name) continue;
-    cookieStore.set(name, value);
-  }
-}
-
-function getCookieHeader() {
-  if (cookieStore.size === 0) return "";
-  return [...cookieStore.entries()].map(([k, v]) => `${k}=${v}`).join("; ");
-}
-
 function requireCredentials(account: string, password: string) {
   if (!account.trim() || !String(password ?? "").trim()) {
     throw new Error(AUTH_CREDENTIALS_REQUIRED_ERROR);
@@ -326,17 +192,18 @@ async function loginWithPassword(payload: LoginPayload = {}) {
     formData.append("user", account);
     formData.append("pass", password);
 
-    await loadCookieStore();
-    const headers = getDefaultHeadersSync();
-    let res = await wretch(`${base.api}/api/login`)
-      .headers({
-        ...headers,
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-      })
-      .post(formData.toString())
-      .res();
+    const res = await noyApi.post(
+      `${base.api}/api/login`,
+      formData.toString(),
+      {
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        },
+        skipAuthRetry: true,
+      },
+    );
 
-    if (!res.ok) {
+    if (res.status < 200 || res.status >= 300) {
       flutterTools.showToast({
         message: `登录请求失败(${res.status})`,
         level: "error",
@@ -344,9 +211,7 @@ async function loginWithPassword(payload: LoginPayload = {}) {
       throw new Error(`登录请求失败(${res.status})`);
     }
 
-    updateCookiesFromResponse(res);
-
-    const json = (await res.json()) as Record<string, unknown>;
+    const json = getResponseJson(res.data) ?? {};
     if (json.status !== "ok") {
       flutterTools.showToast({
         message: String(json.message ?? "登录失败"),
@@ -438,9 +303,7 @@ async function setPasswordAndLogin(payload: Record<string, unknown> = {}) {
 async function setDomainGroup(payload: Record<string, unknown> = {}) {
   const value = readSettingPayloadValue(payload, DOMAIN_GROUP_CONFIG_KEY);
   await persistConfigValue(DOMAIN_GROUP_CONFIG_KEY, value);
-  cookieStore.clear();
-  cookieStoreLoaded = false;
-  await saveCookieStore();
+  await clearStoredCookies();
   return {
     source: PLUGIN_ID,
     data: { domainGroup: value },
@@ -468,6 +331,17 @@ function formatUnixSeconds(value: unknown): string {
 function toNumber(value: unknown, fallback = 0): number {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function toBoolean(value: unknown, fallback = false): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value === 1;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["true", "1", "yes"].includes(normalized)) return true;
+    if (["false", "0", "no"].includes(normalized)) return false;
+  }
+  return fallback;
 }
 
 function createPagingInfo(page: number, pageCount: number, total: number) {
@@ -500,6 +374,8 @@ async function tryAutoLogin(reason: string) {
     );
   }
 }
+
+setAutoLoginHandler(tryAutoLogin);
 
 function buildSearchResult(
   json: Record<string, unknown>,
@@ -552,7 +428,7 @@ function buildSearchResult(
           (item) =>
             createActionItem(item, {
               type: "openSearch",
-              payload: { keyword: item },
+              payload: { keyword: item, extern: { mode: "author" } },
             }),
         ),
         createBasicMetadata("status", "状态", [statusText]),
@@ -560,7 +436,7 @@ function buildSearchResult(
         createMetadataActionList("tags", "标签", tagList, (item) =>
           createActionItem(item, {
             type: "openSearch",
-            payload: { keyword: item },
+            payload: { keyword: item, extern: { mode: "tag" } },
           }),
         ),
         createBasicMetadata("works", "作品", []),
@@ -590,6 +466,89 @@ function buildSearchResult(
 
 // -- Search --
 
+type SearchAdvancedValues = {
+  mode: "default" | "tag" | "author";
+  sort: "time" | "views" | "favorites" | "rating";
+  finished: "" | "false" | "true";
+};
+
+function readSearchAdvancedValues(
+  payload: Record<string, unknown>,
+  extern: Record<string, unknown>,
+): SearchAdvancedValues {
+  const read = (key: string, fallback: string) => {
+    const value = String(extern[key] ?? payload[key] ?? fallback).trim();
+    return value || fallback;
+  };
+
+  const mode = read("mode", "default");
+  const sort = read("sort", "time");
+  const finished = read("finished", "");
+
+  return {
+    mode: ["default", "tag", "author"].includes(mode)
+      ? (mode as SearchAdvancedValues["mode"])
+      : "default",
+    sort: ["time", "views", "favorites", "rating"].includes(sort)
+      ? (sort as SearchAdvancedValues["sort"])
+      : "time",
+    finished: ["", "false", "true"].includes(finished)
+      ? (finished as SearchAdvancedValues["finished"])
+      : "",
+  };
+}
+
+async function getAdvancedSearchScheme(
+  payload: RawApiPayload = {},
+): Promise<AdvancedSearchContract> {
+  const payloadMap = toStringMap(payload);
+  const extern = toStringMap(payload.extern);
+  const values = readSearchAdvancedValues(payloadMap, extern);
+
+  return {
+    source: PLUGIN_ID,
+    scheme: {
+      version: "1.0.0" as const,
+      type: "advancedSearch" as const,
+      title: "高级搜索",
+      fields: [
+        {
+          key: "mode",
+          kind: "choice" as const,
+          label: "搜索模式",
+          options: [
+            { label: "综合", value: "default" },
+            { label: "标签", value: "tag" },
+            { label: "作者", value: "author" },
+          ],
+        },
+        {
+          key: "sort",
+          kind: "choice" as const,
+          label: "排序方式",
+          options: [
+            { label: "最新", value: "time" },
+            { label: "阅读数", value: "views" },
+            { label: "收藏数", value: "favorites" },
+            { label: "评分", value: "rating" },
+          ],
+        },
+        {
+          key: "finished",
+          kind: "choice" as const,
+          label: "完结状态",
+          options: [
+            { label: "全部", value: "" },
+            { label: "连载中", value: "false" },
+            { label: "已完结", value: "true" },
+          ],
+        },
+      ],
+    },
+    data: { values },
+  };
+}
+
 type SearchApiItem = {
   id?: number;
   name?: string;
@@ -607,6 +566,7 @@ type SearchApiItem = {
 async function searchComic(
   payload: SearchPayload = {},
 ): Promise<SearchResultContract> {
+  const payloadMap = toStringMap(payload);
   const extern = toStringMap(payload.extern);
   const page = Math.max(1, Number(payload.page ?? 1) || 1);
   const keyword = String(payload.keyword ?? extern.keyword ?? "").trim();
@@ -614,36 +574,42 @@ async function searchComic(
     throw new Error("keyword 不能为空");
   }
 
-  const mode = String(payload.extern?.mode ?? "default");
+  const advancedValues = readSearchAdvancedValues(payloadMap, extern);
 
   const formData = new URLSearchParams({
     value: keyword,
-    mode: mode,
-    sort: "time",
-    type: "all",
-    finished: "",
+    mode: advancedValues.mode,
+    sort: advancedValues.sort,
+    type: "book",
+    finished: advancedValues.finished,
     page: String(page),
   });
 
   const domainGroup = await getDomainGroup();
-  const api = wretch(domainGroup.api).middlewares([loginRetryMiddleware]);
-  const res = await api
-    .headers({
-      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-    })
-    .post(formData.toString(), "/api/v4/search/fetch")
-    .res();
+  const res = await noyApi.post(
+    `${domainGroup.api}/api/v4/search/fetch`,
+    formData.toString(),
+    {
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+      },
+    },
+  );
 
-  if (!res.ok) {
+  if (res.status < 200 || res.status >= 300) {
     throw new Error(`搜索请求失败(${res.status})`);
   }
 
-  const json = (await res.json()) as Record<string, unknown>;
+  const json = getResponseJson(res.data) ?? {};
   if (json.status !== "ok") {
     throw new Error(String(json.message ?? "搜索失败"));
   }
 
-  return buildSearchResult(json, page, domainGroup.img, payload.extern);
+  return buildSearchResult(json, page, domainGroup.img, {
+    ...extern,
+    ...advancedValues,
+    type: "book",
+  });
 }
 
 // -- Detail --
@@ -664,6 +630,10 @@ type BookApiInfo = {
   Pname?: string;
   publish_year?: string;
   RatingSUM?: number;
+  F?: boolean;
+  f?: boolean;
+  is_favorite?: boolean;
+  favorite?: boolean;
 };
 
 type BookApiChapter = {
@@ -700,14 +670,13 @@ async function getComicDetail(
   }
 
   const domainGroup = await getDomainGroup();
-  const api = wretch(domainGroup.api).middlewares([loginRetryMiddleware]);
-  const res = await api.get(`/api/v4/book/${comicId}`).res();
+  const res = await noyApi.get(`${domainGroup.api}/api/v4/book/${comicId}`);
 
-  if (!res.ok) {
+  if (res.status < 200 || res.status >= 300) {
     throw new Error(`详情请求失败(${res.status})`);
   }
 
-  const json = (await res.json()) as BookApiResponse;
+  const json = (getResponseJson(res.data) ?? {}) as BookApiResponse;
   if (json.status !== "ok" && json.message) {
     throw new Error(String(json.message));
   }
@@ -727,6 +696,9 @@ function buildComicDetail(
   const author = String(info.Author ?? "").trim();
   const isAdult = info.Adult === 1;
   const isFinished = info.Status === 0;
+  const isFavourite = toBoolean(
+    info.F ?? info.f ?? info.is_favorite ?? info.favorite,
+  );
   const statusText = isFinished ? "短篇" : "连载中";
   const description = String(info.Description ?? "").trim();
   const originList = String(info.Otag ?? "")
@@ -871,11 +843,11 @@ function buildComicDetail(
     totalViews: toNumber(info.Views, 0),
     totalLikes: toNumber(info.Favorites, 0),
     totalComments: toNumber(json.comment?.count, 0),
-    isFavourite: false,
+    isFavourite,
     isLiked: false,
-    allowComments: false,
+    allowComments: true,
     allowLike: false,
-    allowCollected: false,
+    allowCollected: true,
     allowDownload: true,
     extern: {},
   };
@@ -1074,7 +1046,6 @@ async function fetchImageBytes({
   }
 
   const base = await getDomainGroup();
-  const requestHeaders = getDefaultHeadersSync();
   const controller =
     typeof AbortController !== "undefined" ? new AbortController() : undefined;
   const resolvedTimeout = Math.max(0, Number(timeoutMs) || 30000);
@@ -1082,33 +1053,1156 @@ async function fetchImageBytes({
     ? setTimeout(() => controller.abort(), resolvedTimeout)
     : undefined;
 
-  let response: Response;
   try {
-    response = await wretch(targetUrl)
-      .headers({
-        ...requestHeaders,
+    const response = await noyApi.get(targetUrl, {
+      headers: {
         Referer: `${base.api}/`,
         Origin: base.api,
         Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-      })
-      .options({ signal: controller?.signal })
-      .get()
-      .res();
+      },
+      responseType: "arraybuffer",
+      signal: controller?.signal,
+    });
+
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(`图片请求失败(${response.status})`);
+    }
+
+    const data = response.data;
+    const bytes =
+      data instanceof Uint8Array
+        ? new Uint8Array(data)
+        : new Uint8Array(data as ArrayBuffer);
+    if (bytes.byteLength === 0) {
+      throw new Error("图片数据为空");
+    }
+
+    return bytes;
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
 
-  if (!response.ok) {
-    throw new Error(`图片请求失败(${response.status})`);
+// -- Noy ACG user/content APIs --
+
+const FORM_HEADERS = {
+  "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+};
+
+function createFormBody(payload: RawApiPayload, keys: string[]) {
+  const form = new URLSearchParams();
+  for (const key of keys) {
+    const value = payload[key];
+    if (value === undefined || value === null) continue;
+    form.set(
+      key,
+      Array.isArray(value)
+        ? value.map((item) => String(item ?? "")).join(",")
+        : String(value),
+    );
+  }
+  return form.toString();
+}
+
+function createApiResult(
+  name: string,
+  method: "GET" | "POST",
+  endpoint: string,
+  response: { status: number; data: unknown },
+): RawApiResult {
+  const data = getResponseJson(response.data) ?? response.data;
+  console.info(`[noy.api] ${name} ${method} ${endpoint} response body`, data);
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(`${name}请求失败(${response.status})`);
+  }
+  return { source: PLUGIN_ID, method, endpoint, status: response.status, data };
+}
+
+async function signIn(payload: RawApiPayload = {}) {
+  const base = await getDomainGroup();
+  const endpoint = `${base.api}/api/v4/signin/sign`;
+  const response = await noyApi.post(endpoint, createFormBody(payload, []), {
+    headers: FORM_HEADERS,
+  });
+  const result = createApiResult("签到", "POST", endpoint, response);
+  const data = toStringMap(result.data);
+  if (Number(data.status) !== 200) {
+    throw new Error(String(data.msg ?? data.message ?? "签到失败"));
+  }
+  return result;
+}
+
+async function getSignInRecord(payload: RawApiPayload = {}) {
+  const base = await getDomainGroup();
+  const query = createFormBody(payload, []);
+  const endpoint = `${base.api}/api/v4/signin/record${query ? `?${query}` : ""}`;
+  const response = await noyApi.get(endpoint);
+  return createApiResult("签到记录", "GET", endpoint, response);
+}
+
+function isSignedInToday(value: unknown) {
+  const data = toStringMap(value);
+  const nested = toStringMap(data.data);
+  const today = data.today ?? nested.today;
+  if (typeof today === "boolean") return today;
+  if (typeof today === "number") return today === 1 || today === 200;
+  const normalized = String(today ?? "")
+    .trim()
+    .toLowerCase();
+  return ["true", "1", "yes", "ok", "signed", "signed_in", "已签到"].includes(
+    normalized,
+  );
+}
+
+function waitForSignInRetry() {
+  return new Promise<void>((resolve) => setTimeout(resolve, 60_000));
+}
+
+async function ensureTodaySignedIn() {
+  while (true) {
+    try {
+      const record = await getSignInRecord();
+      if (isSignedInToday(record.data)) {
+        console.info("[noy.init] already signed in today");
+        return;
+      }
+
+      try {
+        await signIn();
+        console.info("[noy.init] sign-in success");
+        try {
+          await flutterTools.showToast({
+            message: "noyacg 自动签到成功",
+            level: "success",
+          });
+        } catch (error) {
+          console.warn("[noy.init] sign-in notification failed", error);
+        }
+        return;
+      } catch (error) {
+        console.warn("[noy.init] sign-in failed, retrying in 1 minute", error);
+      }
+    } catch (error) {
+      console.warn(
+        "[noy.init] sign-in record check failed, retrying in 1 minute",
+        error,
+      );
+    }
+
+    await waitForSignInRetry();
+  }
+}
+
+async function getUserInfo(payload: RawApiPayload = {}) {
+  const msg =
+    payload.msg === true ||
+    payload.msg === 1 ||
+    String(payload.msg ?? "").toLowerCase() === "true";
+  const base = await getDomainGroup();
+  const endpoint = `${base.api}/api/v3/userinfo${msg ? "?msg=true" : ""}`;
+  const response = await noyApi.post(endpoint, createFormBody(payload, []), {
+    headers: FORM_HEADERS,
+  });
+  return createApiResult(
+    msg ? "用户信息及消息计数" : "用户信息",
+    "POST",
+    endpoint,
+    response,
+  );
+}
+
+async function getUserInfoWithMsg(payload: RawApiPayload = {}) {
+  return getUserInfo({ ...payload, msg: true });
+}
+
+async function getUserInfoBundle(): Promise<UserInfoBundleContract> {
+  const result = await getUserInfoWithMsg();
+  const data = toStringMap(result.data);
+  const nested = toStringMap(data.data);
+  const user = toStringMap(data.userinfo ?? data.userInfo ?? nested.userinfo);
+  const read = (...keys: string[]) =>
+    keys
+      .map((key) => user[key])
+      .find((value) => value !== undefined && value !== null);
+
+  const username = String(
+    read("Username", "username", "nickname") ?? "",
+  ).trim();
+  if (!username) {
+    const message = String(data.message ?? data.msg ?? "").trim();
+    throw new Error(message || "未获取到用户信息，请先完成登录或刷新会话");
   }
 
-  const buffer = await response.arrayBuffer();
-  const bytes = new Uint8Array(buffer);
-  if (bytes.byteLength === 0) {
-    throw new Error("图片数据为空");
+  const base = await getDomainGroup();
+  const uid = String(read("Uid", "uid", "id") ?? "").trim();
+  const avatarPath = String(read("Avatar", "avatar", "avatar_url") ?? "")
+    .trim()
+    .replace(/^\/+/, "");
+  const avatarUrl = avatarPath
+    ? /^https?:\/\//i.test(avatarPath)
+      ? avatarPath
+      : `${base.img}/${avatarPath}`
+    : "";
+  const msgCount = data.msgCount ?? data.msg_count;
+  const email = String(read("Email", "email") ?? "").trim();
+  const integral = read("Integral", "integral");
+  const commentLen = read("CommentLen", "commentLen", "comment_len");
+
+  return {
+    source: PLUGIN_ID,
+    scheme: {
+      version: "1.0.0",
+      type: "userInfo",
+    },
+    data: {
+      title: "账号",
+      avatar: createImage({
+        id: uid || username,
+        url: avatarUrl,
+        name: avatarPath,
+        path: avatarPath,
+        extern: { uid },
+      }),
+      lines: [
+        username,
+        email ? `邮箱：${email}` : "",
+        integral !== undefined ? `积分：${integral}` : "",
+        commentLen !== undefined ? `评论：${commentLen}` : "",
+        msgCount !== undefined ? `未读消息：${msgCount}` : "",
+      ].filter(Boolean),
+      extern: {
+        uid,
+      },
+    },
+  };
+}
+
+async function toggleFavorite(
+  payload: RawApiPayload = {},
+): Promise<ToggleFavoriteResult> {
+  const bid = String(payload.comicId ?? payload.bid ?? "").trim();
+  if (!bid) throw new Error("作品 ID 不能为空");
+  const base = await getDomainGroup();
+  const endpoint = `${base.api}/api/v4/favorites/toggle`;
+  const response = await noyApi.post(
+    endpoint,
+    createFormBody({ ...payload, bid }, ["bid"]),
+    { headers: FORM_HEADERS },
+  );
+  const result = createApiResult("切换收藏", "POST", endpoint, response);
+  const data = toStringMap(result.data);
+  const status = String(data.status ?? "")
+    .trim()
+    .toLowerCase();
+  if (status && status !== "ok") {
+    throw new Error(String(data.message ?? "收藏操作失败"));
+  }
+  return { favorited: !toBoolean(payload.currentFavorite), nextStep: "none" };
+}
+
+async function getFavorites(payload: RawApiPayload = {}) {
+  const extern = toStringMap(payload.extern);
+  const requestPayload = {
+    ...payload,
+    page: payload.page ?? 1,
+    class: payload.class ?? extern.class ?? "",
+    filter: payload.filter ?? extern.filter ?? "",
+  };
+  const base = await getDomainGroup();
+  const endpoint = `${base.api}/api/v4/favorites/get`;
+  const response = await noyApi.post(
+    endpoint,
+    createFormBody(requestPayload, ["page", "class", "filter"]),
+    { headers: FORM_HEADERS },
+  );
+  return createApiResult("收藏列表", "POST", endpoint, response);
+}
+
+async function getFavoriteClasses(payload: RawApiPayload = {}) {
+  const base = await getDomainGroup();
+  const endpoint = `${base.api}/api/v4/favorites/class/get`;
+  const response = await noyApi.post(endpoint, createFormBody(payload, []), {
+    headers: FORM_HEADERS,
+  });
+  return createApiResult("收藏分类", "POST", endpoint, response);
+}
+
+function getFavoriteApiItems(response: RawApiResult): unknown[] {
+  const raw = toStringMap(response.data);
+  const nested = toStringMap(raw.data);
+  if (Array.isArray(raw.data)) return raw.data;
+  if (Array.isArray(nested.data)) return nested.data;
+  if (Array.isArray(raw.info)) return raw.info;
+  if (Array.isArray(nested.info)) return nested.info;
+  return [];
+}
+
+async function getFavoriteData(
+  payload: RawApiPayload = {},
+): Promise<ComicPagedListContract> {
+  const extern = toStringMap(payload.extern);
+  const page = Math.max(1, Number(payload.page ?? 1) || 1);
+  const favoriteClass = String(payload.class ?? extern.class ?? "").trim();
+  const filter = String(payload.filter ?? extern.filter ?? "").trim();
+  const response = await getFavorites({
+    ...payload,
+    page,
+    class: favoriteClass,
+    filter,
+  });
+  const raw = toStringMap(response.data);
+  const nested = toStringMap(raw.data);
+  const rawItems = getFavoriteApiItems(response);
+  const items = rawItems
+    .map((item, index) =>
+      buildRankingItem(item, index, response.endpoint.split("/api/")[0], {
+        ranked: false,
+      }),
+    )
+    .filter((item): item is NonNullable<typeof item> => item !== null);
+  const total = toNumber(raw.count ?? nested.count, rawItems.length);
+  const pageSize = 20;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const paging = createPagingInfo(page, pageCount, total);
+
+  return {
+    source: PLUGIN_ID,
+    extern: { source: "cloudFavorite", class: favoriteClass, filter },
+    scheme: {
+      version: "1.0.0",
+      type: "searchResult",
+      source: PLUGIN_ID,
+      list: "comicGrid",
+    },
+    data: { items, hasReachedMax: paging.hasReachedMax },
+  };
+}
+
+async function getCloudFavoriteFilterBundle(
+  payload: RawApiPayload = {},
+): Promise<FilterBundleContract> {
+  const extern = toStringMap(payload.extern);
+  const response = await getFavoriteClasses(payload);
+  const raw = toStringMap(response.data);
+  const classItems = Array.isArray(raw.data) ? raw.data : [];
+  const options = [
+    {
+      label: "全部",
+      value: "",
+      result: { extern: { class: "" } },
+    },
+    ...classItems
+      .map((item) => {
+        const value = toStringMap(item);
+        const id = String(value.id ?? "").trim();
+        const name = String(value.name ?? "").trim();
+        if (!id || !name) return null;
+        return {
+          label: name,
+          value: id,
+          result: { extern: { class: id } },
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null),
+  ];
+
+  return {
+    source: PLUGIN_ID,
+    scheme: {
+      version: "1.0.0",
+      type: "favoriteFilter",
+      title: "云端收藏筛选",
+      fields: [
+        {
+          key: "class",
+          kind: "choice",
+          label: "收藏分类",
+          options,
+        },
+      ],
+    },
+    data: {
+      values: {
+        class: String(extern.class ?? "").trim(),
+      },
+    },
+  };
+}
+
+async function getCloudFavoriteSceneBundle(): Promise<ComicListSceneBundleContract> {
+  return {
+    source: PLUGIN_ID,
+    scheme: {
+      version: "1.0.0",
+      type: "comicListSceneBundle",
+    },
+    data: {
+      scene: {
+        title: "云端收藏",
+        source: PLUGIN_ID,
+        body: {
+          type: "pluginPagedComicList",
+          request: {
+            fnPath: "getFavoriteData",
+            core: {},
+            extern: { source: "cloudFavorite", class: "", filter: "" },
+          },
+        },
+        filter: {
+          fnPath: "getCloudFavoriteFilterBundle",
+          extern: { source: "cloudFavorite" },
+        },
+      },
+    },
+  };
+}
+
+async function getBookComments(payload: RawApiPayload = {}) {
+  const id = requireApiPayloadString(payload, "id", "作品 ID");
+  const base = await getDomainGroup();
+  const query = createFormBody(payload, ["page"]);
+  const endpoint = `${base.api}/api/v4/comment/book/${encodeURIComponent(id)}/comments${query ? `?${query}` : ""}`;
+  const response = await noyApi.get(endpoint);
+  return createApiResult("漫画评论", "GET", endpoint, response);
+}
+
+async function getBookCommentReplies(payload: RawApiPayload = {}) {
+  const id = requireApiPayloadString(payload, "id", "作品 ID");
+  const cid = requireApiPayloadString(payload, "cid", "评论 ID");
+  const base = await getDomainGroup();
+  const query = createFormBody(payload, ["page"]);
+  const endpoint = `${base.api}/api/v4/comment/book/${encodeURIComponent(id)}/comment/${encodeURIComponent(cid)}/replies${query ? `?${query}` : ""}`;
+  const response = await noyApi.get(endpoint);
+  return createApiResult("漫画评论回复", "GET", endpoint, response);
+}
+
+function formatCommentTime(value: unknown): string {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return "";
+  const seconds = numeric > 1_000_000_000_000 ? numeric / 1000 : numeric;
+  return formatUnixSeconds(seconds);
+}
+
+function buildCommentItem(value: unknown, baseImg: string): CommentItem | null {
+  const item = toStringMap(value);
+  const id = String(item.cid ?? item.id ?? "").trim();
+  const content = String(item.content ?? item.reply ?? "").trim();
+  if (!id || !content) return null;
+
+  const user = toStringMap(item.user);
+  const avatarPath = String(item.avatar ?? "")
+    .trim()
+    .replace(/^\/+/, "");
+  const avatarUrl = avatarPath
+    ? /^https?:\/\//i.test(avatarPath)
+      ? avatarPath
+      : `${baseImg}/${avatarPath}`
+    : "";
+  const replies = Array.isArray(item.replies) ? item.replies : [];
+  const replyCount = toNumber(
+    item.reply_num ?? item.reply_count ?? item.replyCount,
+    replies.length,
+  );
+
+  return {
+    id,
+    author: {
+      name:
+        String(
+          item.username ?? user.name ?? item.reply_username ?? "匿名用户",
+        ).trim() || "匿名用户",
+      avatar: {
+        url: avatarUrl,
+        path: avatarPath,
+      },
+    },
+    content,
+    createdAt: formatCommentTime(item.time ?? item.created_at),
+    replyCount,
+    replies: [],
+    extern: { commentId: id },
+  };
+}
+
+async function getCommentFeed(
+  payload: RawApiPayload = {},
+): Promise<CommentFeedContract> {
+  const comicId = requireApiPayloadString(payload, "comicId", "作品 ID");
+  const page = Math.max(1, Number(payload.page ?? 1) || 1);
+  const response = await getBookComments({ ...payload, id: comicId, page });
+  const raw = toStringMap(response.data);
+  const nested = toStringMap(raw.data);
+  const comments = Array.isArray(raw.comments)
+    ? raw.comments
+    : Array.isArray(nested.comments)
+      ? nested.comments
+      : [];
+  const commentData = Array.isArray(raw.comments) ? raw : nested;
+  const domainGroup =
+    BASE_GROUPS.find((group) => response.endpoint.startsWith(group.api)) ??
+    (await getDomainGroup());
+  const items = comments
+    .map((item) => buildCommentItem(item, domainGroup.img))
+    .filter((item): item is CommentItem => item !== null);
+
+  return {
+    source: PLUGIN_ID,
+    extern: payload.extern ?? null,
+    scheme: {
+      version: "1.0.0",
+      type: "commentFeed",
+    },
+    data: {
+      topItems: [],
+      items,
+      paging: {
+        hasReachedMax: toBoolean(commentData.over, items.length === 0),
+      },
+      replyMode: "lazy",
+      canComment: {
+        comic: false,
+        reply: false,
+      },
+    },
+  };
+}
+
+async function loadCommentReplies(
+  payload: RawApiPayload = {},
+): Promise<CommentRepliesContract> {
+  const comicId = requireApiPayloadString(payload, "comicId", "作品 ID");
+  const commentId = requireApiPayloadString(payload, "commentId", "评论 ID");
+  const page = Math.max(1, Number(payload.page ?? 1) || 1);
+  const response = await getBookCommentReplies({
+    ...payload,
+    id: comicId,
+    cid: commentId,
+    page,
+  });
+  const raw = toStringMap(response.data);
+  const nested = toStringMap(raw.data);
+  const replies = Array.isArray(raw.replies)
+    ? raw.replies
+    : Array.isArray(nested.replies)
+      ? nested.replies
+      : [];
+  const replyData = Array.isArray(raw.replies) ? raw : nested;
+  const domainGroup =
+    BASE_GROUPS.find((group) => response.endpoint.startsWith(group.api)) ??
+    (await getDomainGroup());
+  const items = replies
+    .map((item) => buildCommentItem(item, domainGroup.img))
+    .filter((item): item is CommentItem => item !== null);
+
+  return {
+    source: PLUGIN_ID,
+    extern: payload.extern ?? null,
+    scheme: {
+      version: "1.0.0",
+      type: "commentReplies",
+    },
+    data: {
+      commentId,
+      items,
+      paging: {
+        hasReachedMax: toBoolean(replyData.over, items.length === 0),
+      },
+    },
+  };
+}
+
+async function getReadLeaderboard(payload: RawApiPayload = {}) {
+  const base = await getDomainGroup();
+  const endpoint = `${base.api}/api/readLeaderboard`;
+  const response = await noyApi.post(
+    endpoint,
+    createFormBody(
+      { ...payload, page: payload.page ?? 1, type: payload.type ?? "day" },
+      ["page", "type"],
+    ),
+    { headers: FORM_HEADERS },
+  );
+  return createApiResult("阅读榜", "POST", endpoint, response);
+}
+
+async function getFavoriteLeaderboard(payload: RawApiPayload = {}) {
+  const base = await getDomainGroup();
+  const endpoint = `${base.api}/api/favLeaderboard`;
+  const response = await noyApi.post(
+    endpoint,
+    createFormBody(
+      { ...payload, page: payload.page ?? 1, type: payload.type ?? "day" },
+      ["page", "type"],
+    ),
+    { headers: FORM_HEADERS },
+  );
+  return createApiResult("收藏榜", "POST", endpoint, response);
+}
+
+async function getProportionLeaderboard(payload: RawApiPayload = {}) {
+  const base = await getDomainGroup();
+  const endpoint = `${base.api}/api/proportion`;
+  const response = await noyApi.post(
+    endpoint,
+    createFormBody({ ...payload, page: payload.page ?? 1 }, ["page"]),
+    { headers: FORM_HEADERS },
+  );
+  return createApiResult("高质量榜", "POST", endpoint, response);
+}
+
+async function getHome(payload: RawApiPayload = {}) {
+  const base = await getDomainGroup();
+  const endpoint = `${base.api}/api/home`;
+  const response = await noyApi.post(
+    endpoint,
+    createFormBody(payload, ["v", "stream_all"]),
+    { headers: FORM_HEADERS },
+  );
+  return createApiResult("首页", "POST", endpoint, response);
+}
+
+async function getTagList(payload: RawApiPayload = {}) {
+  const base = await getDomainGroup();
+  const endpoint = `${base.api}/api/bigtaglist`;
+  const response = await noyApi.post(endpoint, createFormBody(payload, []), {
+    headers: FORM_HEADERS,
+  });
+  return createApiResult("分类标签列表", "POST", endpoint, response);
+}
+
+async function getLatestBooks(payload: RawApiPayload = {}) {
+  const base = await getDomainGroup();
+  const endpoint = `${base.api}/api/b1/booklist`;
+  const response = await noyApi.post(
+    endpoint,
+    createFormBody(
+      {
+        ...payload,
+        page: payload.page ?? 1,
+        sort: payload.sort ?? "",
+        finished: payload.finished ?? "",
+      },
+      ["page", "sort", "finished"],
+    ),
+    { headers: FORM_HEADERS },
+  );
+  return createApiResult("最新漫画", "POST", endpoint, response);
+}
+
+async function getRandomBook(payload: RawApiPayload = {}) {
+  const base = await getDomainGroup();
+  const endpoint = `${base.api}/api/v4/book/random`;
+  const response = await noyApi.post(endpoint);
+  return createApiResult("随机漫画", "POST", endpoint, response);
+}
+
+function toStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => String(item ?? "").trim()).filter(Boolean);
+}
+
+function buildTagSearchChip(
+  label: unknown,
+  keyword: unknown,
+  raw: unknown = {},
+): FunctionPageChipItem | null {
+  const chipLabel = String(label ?? "").trim();
+  const searchKeyword = String(keyword ?? "").trim();
+  if (!chipLabel || !searchKeyword) return null;
+
+  return {
+    label: chipLabel,
+    action: {
+      type: "openSearch",
+      payload: {
+        source: PLUGIN_ID,
+        keyword: searchKeyword,
+        extern: { mode: "tag" },
+      },
+    },
+    raw: toStringMap(raw),
+  };
+}
+
+function buildFunctionPage(
+  title: string,
+  items: FunctionPageChipItem[],
+): FunctionPageContract {
+  return {
+    source: PLUGIN_ID,
+    scheme: {
+      version: "1.0.0",
+      type: "page",
+      title,
+      body: {
+        type: "list",
+        children: [{ type: "chip-list", key: "items" }],
+      },
+    },
+    data: {
+      items,
+      hasReachedMax: true,
+    },
+  };
+}
+
+function buildNavigationPage(
+  title: string,
+  items: FunctionPageActionGridItem[],
+): FunctionPageContract {
+  return {
+    source: PLUGIN_ID,
+    scheme: {
+      version: "1.0.0",
+      type: "page",
+      title,
+      body: {
+        type: "list",
+        children: [{ type: "action-grid", key: "items" }],
+      },
+    },
+    data: {
+      items,
+      hasReachedMax: true,
+    },
+  };
+}
+
+async function getFunctionPage(
+  payload: RawApiPayload = {},
+): Promise<FunctionPageContract> {
+  const extern = toStringMap(payload.extern);
+  const id = String(payload.id ?? extern.id ?? "").trim();
+
+  if (id === "categories") {
+    const response = await getTagList(payload);
+    const raw = toStringMap(response.data);
+    const categoryItems = Array.isArray(raw.data)
+      ? raw.data
+      : Array.isArray(raw.info)
+        ? raw.info
+        : [];
+    const responseBase =
+      BASE_GROUPS.find((group) => response.endpoint.startsWith(group.api)) ??
+      (await getDomainGroup());
+    const items = categoryItems
+      .map((value): FunctionPageActionGridItem | null => {
+        const category = toStringMap(value);
+        const tag = String(category.tag ?? category.name ?? "").trim();
+        const search = toStringList(category.search);
+        const coverId = String(category.cover ?? "").trim();
+        const keyword = search.length > 0 ? search.join(" ") : tag;
+        if (!tag || !keyword) return null;
+
+        return {
+          title: tag,
+          cover: {
+            url:
+              coverId && coverId !== "0"
+                ? `${responseBase.img}/${coverId}/m1.webp`
+                : NOT_FOUND_IMAGE_URL,
+            path: coverId
+              ? `comic/${coverId}/cover.webp`
+              : PLACEHOLDER_IMAGE_PATH,
+            extern: {},
+          },
+          action: {
+            type: "openSearch",
+            payload: {
+              source: PLUGIN_ID,
+              keyword,
+              extern: { mode: "tag" },
+            },
+          },
+          raw: category,
+        } as FunctionPageActionGridItem;
+      })
+      .filter((item): item is FunctionPageActionGridItem => item !== null);
+
+    return buildNavigationPage("分类", items);
   }
 
-  return bytes;
+  if (id === "tagRecommendations") {
+    const response = await getHome({
+      ...payload,
+      v: payload.v ?? "1",
+      stream_all: payload.stream_all ?? "1",
+    });
+    const raw = toStringMap(response.data);
+    const nested = toStringMap(raw.data);
+    const tags = toStringList(raw.tags ?? nested.tags);
+    const items = tags
+      .map((tag) => buildTagSearchChip(tag, tag, { tag }))
+      .filter((item): item is FunctionPageChipItem => item !== null);
+
+    return buildFunctionPage("标签推荐", items);
+  }
+
+  throw new Error(`不支持的功能页面：${id || "未指定"}`);
+}
+
+type RankingSource = "read" | "favorite" | "proportion";
+
+function readRankingValue(
+  item: Record<string, unknown>,
+  ...keys: string[]
+): unknown {
+  for (const key of keys) {
+    if (item[key] !== undefined && item[key] !== null) return item[key];
+  }
+  return undefined;
+}
+
+function buildRankingItem(
+  value: unknown,
+  index: number,
+  baseImg: string,
+  options: { ranked?: boolean } = {},
+) {
+  const item = toStringMap(value);
+  const comicId = String(
+    readRankingValue(item, "Bid", "bid", "id", "book_id") ?? "",
+  ).trim();
+  if (!comicId) return null;
+
+  const title =
+    String(
+      readRankingValue(item, "Bookname", "bookname", "name", "title") ?? "",
+    ).trim() || `漫画 ${comicId}`;
+  const author = String(
+    readRankingValue(item, "Author", "author") ?? "",
+  ).trim();
+  const status = Number(readRankingValue(item, "Status", "status"));
+  const adult = Number(readRankingValue(item, "Adult", "adult"));
+  const views = toNumber(readRankingValue(item, "Views", "views"));
+  const favorites = toNumber(readRankingValue(item, "Favorites", "favorites"));
+  const rating = toNumber(
+    readRankingValue(item, "RatingSUM", "rating_sum", "rating"),
+  );
+  const isFinished = status === 0;
+  const statusText = isFinished ? "短篇" : "连载中";
+  const path = `comic/${comicId}/cover.webp`;
+  const tags = String(readRankingValue(item, "Ptag", "ptag", "tags") ?? "")
+    .split(/\s+/g)
+    .map((tag) => tag.trim())
+    .filter(Boolean);
+
+  return {
+    source: PLUGIN_ID,
+    id: comicId,
+    title,
+    subtitle: [
+      options.ranked === false ? "" : `第${index + 1}名`,
+      author,
+      adult === 1 ? "R18" : "",
+      statusText,
+      views > 0 ? `${views} 阅读` : "",
+      rating > 0 ? `评分 ${(rating / 2).toFixed(1)}` : "",
+    ]
+      .filter(Boolean)
+      .join(" · "),
+    finished: isFinished,
+    likesCount: favorites,
+    viewsCount: views,
+    updatedAt: formatUnixSeconds(readRankingValue(item, "Time", "time")),
+    cover: {
+      id: comicId,
+      url: `${baseImg}/${comicId}/m1.webp`,
+      path,
+      name: `${comicId}.webp`,
+      extern: { path },
+    },
+    metadata: [
+      createMetadataActionList("author", "作者", author ? [author] : []),
+      createBasicMetadata("status", "状态", [statusText]),
+      createMetadataActionList("tags", "标签", tags),
+    ].filter((metadata) => {
+      const value = toStringMap(metadata).value;
+      return Array.isArray(value) && value.length > 0;
+    }),
+    raw: item,
+    extern: { comicId },
+  };
+}
+
+async function getLatestData(
+  payload: RawApiPayload = {},
+): Promise<ComicPagedListContract> {
+  const extern = toStringMap(payload.extern);
+  const page = Math.max(1, Number(payload.page ?? 1) || 1);
+  const sort = String(payload.sort ?? extern.sort ?? "");
+  const finished = String(payload.finished ?? extern.finished ?? "");
+  const randomValue = payload.random ?? extern.random ?? false;
+  const random =
+    randomValue === true || String(randomValue).toLowerCase() === "true";
+  const response = random
+    ? await getRandomBook(payload)
+    : await getLatestBooks({ page, sort, finished });
+  const responseBase =
+    BASE_GROUPS.find((group) => response.endpoint.startsWith(group.api)) ??
+    (await getDomainGroup());
+  const raw = toStringMap(response.data);
+  const nested = toStringMap(raw.data);
+  const rawItems = Array.isArray(raw.info)
+    ? raw.info
+    : Array.isArray(nested.info)
+      ? nested.info
+      : Array.isArray(raw.data)
+        ? raw.data
+        : [];
+  const items = rawItems
+    .map((item, index) =>
+      buildRankingItem(item, index, responseBase.img, { ranked: false }),
+    )
+    .filter((item): item is NonNullable<typeof item> => item !== null);
+  const total = toNumber(raw.len ?? nested.len, rawItems.length);
+  const pageSize = 20;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+
+  return {
+    source: PLUGIN_ID,
+    extern: random ? { random: true } : { sort, finished, random: false },
+    scheme: {
+      version: "1.0.0",
+      type: "latestFeed",
+      source: PLUGIN_ID,
+    },
+    data: {
+      items,
+      hasReachedMax: random || page >= pageCount || rawItems.length < pageSize,
+    },
+  };
+}
+
+async function getRankingData(
+  payload: RawApiPayload = {},
+): Promise<ComicPagedListContract> {
+  const extern = toStringMap(payload.extern);
+  const leaderboardValue = String(
+    payload.leaderboard ?? extern.leaderboard ?? "read",
+  );
+  const leaderboard: RankingSource =
+    leaderboardValue === "favorite" || leaderboardValue === "proportion"
+      ? leaderboardValue
+      : "read";
+  const rankTypeValue = String(payload.rankType ?? extern.rankType ?? "day");
+  const rankType = ["day", "week", "moon"].includes(rankTypeValue)
+    ? rankTypeValue
+    : "day";
+  const page = Math.max(1, Number(payload.page ?? 1) || 1);
+  const domainGroup = await getDomainGroup();
+
+  let response: RawApiResult;
+  if (leaderboard === "favorite") {
+    response = await getFavoriteLeaderboard({ page, type: rankType });
+  } else if (leaderboard === "proportion") {
+    response = await getProportionLeaderboard({ page });
+  } else {
+    response = await getReadLeaderboard({ page, type: rankType });
+  }
+
+  const responseBase =
+    BASE_GROUPS.find((group) => response.endpoint.startsWith(group.api)) ??
+    domainGroup;
+  const raw = toStringMap(response.data);
+  const nested = toStringMap(raw.data);
+  const rawItems = Array.isArray(raw.info)
+    ? raw.info
+    : Array.isArray(nested.info)
+      ? nested.info
+      : Array.isArray(raw.data)
+        ? raw.data
+        : [];
+  const items = rawItems
+    .map((item, index) => buildRankingItem(item, index, responseBase.img))
+    .filter((item): item is NonNullable<typeof item> => item !== null);
+  const total = toNumber(raw.len ?? nested.len, rawItems.length);
+  const pageSize = 20;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+
+  return {
+    source: PLUGIN_ID,
+    extern: { leaderboard, rankType },
+    scheme: {
+      version: "1.0.0",
+      type: "rankingFeed",
+      source: PLUGIN_ID,
+    },
+    data: {
+      items,
+      hasReachedMax: page >= pageCount || rawItems.length < pageSize,
+    },
+  };
+}
+
+async function getRankingFilterBundle(
+  _payload: RawApiPayload = {},
+): Promise<FilterBundleContract> {
+  return {
+    source: PLUGIN_ID,
+    scheme: {
+      version: "1.0.0",
+      type: "rankingFilter",
+      fields: [
+        {
+          key: "ranking",
+          kind: "choice",
+          label: "榜单与排名模式",
+          options: [
+            {
+              label: "阅读榜",
+              value: "read",
+              result: { extern: { leaderboard: "read", rankType: "day" } },
+              children: [
+                {
+                  label: "日榜",
+                  value: "read-day",
+                  result: {
+                    extern: { leaderboard: "read", rankType: "day" },
+                  },
+                },
+                {
+                  label: "周榜",
+                  value: "read-week",
+                  result: {
+                    extern: { leaderboard: "read", rankType: "week" },
+                  },
+                },
+                {
+                  label: "月榜",
+                  value: "read-moon",
+                  result: {
+                    extern: { leaderboard: "read", rankType: "moon" },
+                  },
+                },
+              ],
+            },
+            {
+              label: "收藏榜",
+              value: "favorite",
+              result: {
+                extern: { leaderboard: "favorite", rankType: "day" },
+              },
+              children: [
+                {
+                  label: "日榜",
+                  value: "favorite-day",
+                  result: {
+                    extern: { leaderboard: "favorite", rankType: "day" },
+                  },
+                },
+                {
+                  label: "周榜",
+                  value: "favorite-week",
+                  result: {
+                    extern: { leaderboard: "favorite", rankType: "week" },
+                  },
+                },
+                {
+                  label: "月榜",
+                  value: "favorite-moon",
+                  result: {
+                    extern: { leaderboard: "favorite", rankType: "moon" },
+                  },
+                },
+              ],
+            },
+            {
+              label: "高质量榜",
+              value: "proportion",
+              result: { extern: { leaderboard: "proportion" } },
+            },
+          ],
+        },
+      ],
+    },
+    data: {
+      values: {
+        ranking: "read-day",
+      },
+    },
+  };
+}
+
+async function getLatestFilterBundle(
+  _payload: RawApiPayload = {},
+): Promise<FilterBundleContract> {
+  return {
+    source: PLUGIN_ID,
+    scheme: {
+      version: "1.0.0",
+      type: "latestFilter",
+      title: "筛选最新",
+      fields: [
+        {
+          key: "sort",
+          kind: "choice",
+          label: "排序",
+          options: [
+            {
+              label: "最新上传",
+              value: "",
+              result: { extern: { sort: "" } },
+            },
+            {
+              label: "阅读数",
+              value: "views",
+              result: { extern: { sort: "views" } },
+            },
+            {
+              label: "收藏数",
+              value: "favorites",
+              result: { extern: { sort: "favorites" } },
+            },
+            {
+              label: "评分",
+              value: "rating",
+              result: { extern: { sort: "rating" } },
+            },
+            {
+              label: "上传时间",
+              value: "upload",
+              result: { extern: { sort: "upload" } },
+            },
+            {
+              label: "随机",
+              value: "random",
+              result: { extern: { sort: "", random: true } },
+            },
+          ],
+        },
+        {
+          key: "finished",
+          kind: "choice",
+          label: "完结状态",
+          options: [
+            {
+              label: "全部",
+              value: "",
+              result: { extern: { finished: "" } },
+            },
+            {
+              label: "连载中",
+              value: "false",
+              result: { extern: { finished: "false" } },
+            },
+            {
+              label: "已完结",
+              value: "true",
+              result: { extern: { finished: "true" } },
+            },
+          ],
+        },
+      ],
+    },
+    data: {
+      values: {
+        sort: "",
+        finished: "",
+        random: false,
+      },
+    },
+  };
 }
 
 // -- Settings --
@@ -1182,7 +2276,7 @@ async function getSettingsBundle(): Promise<SettingsBundleContract> {
       ],
     },
     data: {
-      canShowUserInfo: false,
+      canShowUserInfo: true,
       values: {
         [AUTH_ACCOUNT_CONFIG_KEY]: account,
         [AUTH_PASSWORD_CONFIG_KEY]: password,
@@ -1200,7 +2294,6 @@ async function getSettingsBundle(): Promise<SettingsBundleContract> {
 async function init() {
   if (!noyInitStarted) {
     noyInitStarted = true;
-    await loadCookieStore();
     try {
       const [account, password] = await Promise.all([
         loadAuthAccount(),
@@ -1214,6 +2307,9 @@ async function init() {
           persistCredentials: true,
         });
         console.info("[noy.init] login success");
+        void ensureTodaySignedIn().catch((error) =>
+          console.warn("[noy.init] background sign-in stopped", error),
+        );
       } else {
         console.info("[noy.init] skip login: no credentials");
       }
@@ -1233,17 +2329,58 @@ async function getInfo(): Promise<ReturnType<typeof buildPluginInfo>> {
 }
 
 export default {
+  // 初始化插件并尝试恢复已保存的登录状态。
   init,
+  // 返回插件名称、版本和功能元信息。
   getInfo,
-  loginWithPassword,
+  // 保存用户名并重新登录。
   setAccountAndLogin,
+  // 保存密码并重新登录。
   setPasswordAndLogin,
+  // 切换 API 线路并清理旧线路的 Cookie。
   setDomainGroup,
+  // 设置搜索时的年龄限制。
   setAllowAdult,
+  // 获取高级搜索表单定义。
+  getAdvancedSearchScheme,
+  // 按关键词和高级筛选条件搜索漫画。
   searchComic,
+  // 获取漫画详情、章节和收藏状态。
   getComicDetail,
+  // 根据章节信息生成阅读页面列表。
   getChapter,
+  // 获取阅读快照及当前章节信息。
   getReadSnapshot,
+  // 下载漫画图片并返回二进制数据。
   fetchImageBytes,
+  // 执行每日签到。
+  signIn,
+  // 获取签到记录。
+  getSignInRecord,
+  // 获取设置页显示的用户信息卡片。
+  getUserInfoBundle,
+  // 切换漫画的收藏状态。
+  toggleFavorite,
+  // 获取格式化后的云端收藏漫画列表。
+  getFavoriteData,
+  // 获取云端收藏分类筛选器。
+  getCloudFavoriteFilterBundle,
+  // 获取云端收藏页面定义。
+  getCloudFavoriteSceneBundle,
+  // 获取格式化后的漫画评论列表。
+  getCommentFeed,
+  // 获取指定评论的回复列表。
+  loadCommentReplies,
+  // 获取格式化后的最新漫画列表（包含最新中的随机模式）。
+  getLatestData,
+  // 获取插件功能页和导航页定义。
+  getFunctionPage,
+  // 获取格式化后的排行榜列表。
+  getRankingData,
+  // 获取排行榜筛选器定义。
+  getRankingFilterBundle,
+  // 获取最新漫画筛选器定义。
+  getLatestFilterBundle,
+  // 获取插件设置页面定义及当前设置值。
   getSettingsBundle,
 };
