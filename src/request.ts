@@ -38,6 +38,7 @@ export const BASE_GROUPS: BaseApiGroup[] = [
   { api: "https://api.noyteam.online", img: "https://img.noyteam.online" },
   { api: "https://api.noy.asia", img: "https://img.noy.asia" },
 ];
+const DEFAULT_DOMAIN_GROUP_INDEX = 0;
 
 let cookieStore = new Map<string, string>();
 let cookieStoreLoaded = false;
@@ -93,13 +94,18 @@ export function setAutoLoginHandler(
 
 export async function getDomainGroup(): Promise<BaseApiGroup> {
   try {
-    const raw = await loadConfigString(DOMAIN_GROUP_CONFIG_KEY, "2");
+    const raw = await loadConfigString(
+      DOMAIN_GROUP_CONFIG_KEY,
+      String(DEFAULT_DOMAIN_GROUP_INDEX),
+    );
     const index = Number(raw);
     return BASE_GROUPS[
-      Number.isFinite(index) && index >= 0 && index <= 2 ? index : 2
+      Number.isInteger(index) && index >= 0 && index < BASE_GROUPS.length
+        ? index
+        : DEFAULT_DOMAIN_GROUP_INDEX
     ];
   } catch {
-    return BASE_GROUPS[2];
+    return BASE_GROUPS[DEFAULT_DOMAIN_GROUP_INDEX];
   }
 }
 

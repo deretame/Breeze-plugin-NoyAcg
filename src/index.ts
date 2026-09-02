@@ -1134,10 +1134,11 @@ async function signIn(payload: RawApiPayload = {}) {
 
 async function getSignInRecord(payload: RawApiPayload = {}) {
   const base = await getDomainGroup();
-  const query = createFormBody(payload, []);
-  const endpoint = `${base.api}/api/v4/signin/record${query ? `?${query}` : ""}`;
-  const response = await noyApi.get(endpoint);
-  return createApiResult("签到记录", "GET", endpoint, response);
+  const endpoint = `${base.api}/api/v4/signin/record`;
+  const response = await noyApi.post(endpoint, createFormBody(payload, []), {
+    headers: FORM_HEADERS,
+  });
+  return createApiResult("签到记录", "POST", endpoint, response);
 }
 
 function isSignedInToday(value: unknown) {
@@ -2213,7 +2214,7 @@ async function getSettingsBundle(): Promise<SettingsBundleContract> {
     loadAuthPassword(),
   ]);
 
-  const domainGroup = await readConfigValue(DOMAIN_GROUP_CONFIG_KEY, "2");
+  const domainGroup = await readConfigValue(DOMAIN_GROUP_CONFIG_KEY, "0");
   const allowAdult = await readConfigValue(ALLOW_ADULT_CONFIG_KEY, "both");
 
   const data = {
@@ -2250,8 +2251,9 @@ async function getSettingsBundle(): Promise<SettingsBundleContract> {
               label: "线路",
               fnPath: "setDomainGroup",
               options: [
-                { label: "主线路", value: "2" },
+                { label: "主线路", value: "0" },
                 { label: "备用", value: "1" },
+                { label: "亚洲线路", value: "2" },
               ],
             },
           ],
