@@ -1053,13 +1053,17 @@ async function fetchImageBytes({
     ? setTimeout(() => controller.abort(), resolvedTimeout)
     : undefined;
 
+  const headers = {
+    Referer: `${base.api}/`,
+    Origin: base.api,
+    Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+  };
+
+  // console.debug(`url = ${url}, headers = ${JSON.stringify(headers)}`);
+
   try {
     const response = await noyApi.get(targetUrl, {
-      headers: {
-        Referer: `${base.api}/`,
-        Origin: base.api,
-        Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-      },
+      headers,
       responseType: "arraybuffer",
       signal: controller?.signal,
     });
@@ -1111,7 +1115,7 @@ function createApiResult(
   response: { status: number; data: unknown },
 ): RawApiResult {
   const data = getResponseJson(response.data) ?? response.data;
-  console.info(`[noy.api] ${name} ${method} ${endpoint} response body`, data);
+  // console.info(`[noy.api] ${name} ${method} ${endpoint} response body`, data);
   if (response.status < 200 || response.status >= 300) {
     throw new Error(`${name}请求失败(${response.status})`);
   }
@@ -1484,20 +1488,22 @@ function formatCommentTime(value: unknown): string {
   return formatUnixSeconds(seconds);
 }
 
-function buildCommentItem(value: unknown, baseImg: string): CommentItem | null {
+function buildCommentItem(value: unknown, baseImg: string): CommentItem {
   const item = toStringMap(value);
   const id = String(item.cid ?? item.id ?? "").trim();
   const content = String(item.content ?? item.reply ?? "").trim();
-  if (!id || !content) return null;
 
   const user = toStringMap(item.user);
   const avatarPath = String(item.avatar ?? "")
     .trim()
     .replace(/^\/+/, "");
+  const avatarBase = avatarPath.toLowerCase().startsWith("avatar/")
+    ? baseImg.replace(/^(https?:\/\/)img\./i, "$1bucket.")
+    : baseImg;
   const avatarUrl = avatarPath
     ? /^https?:\/\//i.test(avatarPath)
       ? avatarPath
-      : `${baseImg}/${avatarPath}`
+      : `${avatarBase}/${avatarPath}`
     : "";
   const replies = Array.isArray(item.replies) ? item.replies : [];
   const replyCount = toNumber(
@@ -1532,19 +1538,13 @@ async function getCommentFeed(
   const page = Math.max(1, Number(payload.page ?? 1) || 1);
   const response = await getBookComments({ ...payload, id: comicId, page });
   const raw = toStringMap(response.data);
-  const nested = toStringMap(raw.data);
-  const comments = Array.isArray(raw.comments)
-    ? raw.comments
-    : Array.isArray(nested.comments)
-      ? nested.comments
-      : [];
-  const commentData = Array.isArray(raw.comments) ? raw : nested;
-  const domainGroup =
-    BASE_GROUPS.find((group) => response.endpoint.startsWith(group.api)) ??
-    (await getDomainGroup());
-  const items = comments
-    .map((item) => buildCommentItem(item, domainGroup.img))
-    .filter((item): item is CommentItem => item !== null);
+  // console.debug(raw);
+  const data = toStringMap(raw.data);
+  const comments = data.comments as unknown[];
+  const domainGroup = BASE_GROUPS.find((group) =>
+    response.endpoint.startsWith(group.api),
+  )!;
+  const items = comments.map((item) => buildCommentItem(item, domainGroup.img));
 
   return {
     source: PLUGIN_ID,
@@ -1557,7 +1557,7 @@ async function getCommentFeed(
       topItems: [],
       items,
       paging: {
-        hasReachedMax: toBoolean(commentData.over, items.length === 0),
+        hasReachedMax: toBoolean(data.over),
       },
       replyMode: "lazy",
       canComment: {
