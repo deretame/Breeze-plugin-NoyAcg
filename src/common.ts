@@ -2,7 +2,7 @@ export const PLUGIN_ID = "babe7021-2df8-4abc-bba8-00bbfd7a0f75";
 export const NOT_FOUND_IMAGE_URL = "";
 export const PLACEHOLDER_IMAGE_PATH = "placeholder/image-404.png";
 
-import type { ActionItem, MetadataListItem } from "breeze-plugin-kit";
+import type { ActionItem, ComicInfoPageAction, MetadataListItem } from "breeze-plugin-kit";
 
 export function toStringMap(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -13,9 +13,9 @@ export function toStringMap(value: unknown): Record<string, unknown> {
 
 export function createActionItem(
   name: unknown,
-  onTap: Record<string, unknown> = {},
+  onTap: ComicInfoPageAction | null = null,
   extern: Record<string, unknown> = {},
-) {
+): ActionItem {
   return {
     name: String(name ?? ""),
     onTap,
@@ -60,11 +60,7 @@ export function createMetadataActionList(
   };
 }
 
-export function createBasicMetadata(
-  type: string,
-  name: string,
-  values: unknown,
-): MetadataListItem {
+export function createBasicMetadata(type: string, name: string, values: unknown): MetadataListItem {
   const list = Array.isArray(values) ? values : values == null ? [] : [values];
   return {
     type,
@@ -72,7 +68,7 @@ export function createBasicMetadata(
     value: list
       .map((item) => String(item ?? "").trim())
       .filter(Boolean)
-      .map((item) => ({ name: item, onTap: {}, extern: {} }) as ActionItem),
+      .map((item) => createActionItem(item)),
   };
 }
 
@@ -137,33 +133,6 @@ export function createPaging(page = 1, total = 1) {
     hasReachedMax: true,
   };
 }
-
-type FieldKind =
-  | "text"
-  | "password"
-  | "switch"
-  | "select"
-  | "choice"
-  | "multiChoice";
-
-type BaseField = {
-  key: string;
-  kind: FieldKind;
-  label: string;
-  fnPath?: string;
-  persist?: boolean;
-};
-
-type OptionField = BaseField & {
-  kind: "select" | "choice" | "multiChoice";
-  options?: Array<{ label: string; value: unknown }>;
-};
-
-type PlainField = BaseField & {
-  kind: "text" | "password" | "switch";
-};
-
-type SettingsField = OptionField | PlainField;
 
 import type { SettingsBundleContract } from "breeze-plugin-kit";
 export type { SettingsBundleContract };

@@ -7,9 +7,7 @@ const brotliCompressAsync = promisify(brotliCompress);
 
 async function main() {
   const distDir = resolve(process.cwd(), "dist");
-  const files = (await readdir(distDir)).filter((file) =>
-    file.endsWith(".bundle.cjs"),
-  );
+  const files = (await readdir(distDir)).filter((file) => file.endsWith(".bundle.cjs"));
 
   if (files.length === 0) {
     throw new Error(`[brotli] no .bundle.cjs file found in ${distDir}`);

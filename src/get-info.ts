@@ -7,15 +7,10 @@ export function buildPluginInfo(): InfoContract {
     uuid: PLUGIN_ID,
     iconUrl:
       "https://raw.githubusercontent.com/deretame/Breeze-plugin-NoyAcg/main/assets/ic_launcher_foreground.webp",
-    creator: {
-      name: "",
-      describe: "",
-    },
     describe: "NoyAcg 插件",
-    version: "0.0.7",
+    version: "0.0.8",
     home: "https://github.com/deretame/Breeze-plugin-NoyAcg",
-    updateUrl:
-      "https://api.github.com/repos/deretame/Breeze-plugin-NoyAcg/releases/latest",
+    updateUrl: "https://api.github.com/repos/deretame/Breeze-plugin-NoyAcg/releases/latest",
     npmName: "breeze-plugin-noy-acg",
     function: [
       {

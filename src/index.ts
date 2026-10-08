@@ -12,11 +12,14 @@ import type {
   FunctionPageActionGridItem,
   FunctionPageChipItem,
   FunctionPageContract,
+  LoginBundleContract,
+  LoginSubmitResult,
   ReadSnapshotContract,
   SearchResultContract,
   ToggleFavoriteResult,
   UserInfoBundleContract,
 } from "breeze-plugin-kit";
+import { buildLoginBundle, buildUnauthorizedError, readLoginValues } from "breeze-plugin-kit";
 import { cache, flutterTools, pluginConfig } from "breeze-plugin-kit";
 import {
   createActionItem,
@@ -78,6 +81,7 @@ type FetchImagePayload = {
 type LoginPayload = {
   account?: string;
   password?: string;
+  values?: Record<string, unknown>;
   reason?: string;
   persistCredentials?: boolean;
 };
@@ -121,16 +125,9 @@ function decodeConfigString(raw: unknown, fallback = "") {
       (parsed as Record<string, unknown>).ok === true &&
       "value" in (parsed as Record<string, unknown>)
     ) {
-      return decodeConfigString(
-        (parsed as Record<string, unknown>).value,
-        fallback,
-      );
+      return decodeConfigString((parsed as Record<string, unknown>).value, fallback);
     }
-    if (
-      typeof parsed === "string" ||
-      typeof parsed === "number" ||
-      typeof parsed === "boolean"
-    ) {
+    if (typeof parsed === "string" || typeof parsed === "number" || typeof parsed === "boolean") {
       return String(parsed);
     }
   } catch {
@@ -147,8 +144,7 @@ async function saveConfigString(key: string, value: string) {
 async function loadAndNormalizeConfigString(key: string, fallback = "") {
   const raw = await pluginConfig.load(key, fallback);
   const normalized = decodeConfigString(raw, fallback);
-  const currentRawText =
-    typeof raw === "string" ? raw : raw == null ? "" : String(raw);
+  const currentRawText = typeof raw === "string" ? raw : raw == null ? "" : String(raw);
   if (currentRawText !== normalized) {
     try {
       await saveConfigString(key, normalized);
@@ -173,15 +169,19 @@ function requireCredentials(account: string, password: string) {
   }
 }
 
-async function loginWithPassword(payload: LoginPayload = {}) {
-  const account = String(payload.account ?? "").trim();
-  const password = String(payload.password ?? "");
+async function loginWithPassword(payload: LoginPayload = {}): Promise<LoginSubmitResult> {
+  const record = payload as Record<string, unknown>;
+  const formValues =
+    record.values !== undefined ? readLoginValues(payload) : ({} as Record<string, string>);
+  const account = (formValues.account ?? String(payload.account ?? "").trim()).trim();
+  const password = formValues.password ?? String(payload.password ?? "");
   requireCredentials(account, password);
 
   if (loginInFlight) {
     await loginInFlight;
     return {
       source: PLUGIN_ID,
+      message: "登录成功",
       data: { account, password },
     };
   }
@@ -192,16 +192,12 @@ async function loginWithPassword(payload: LoginPayload = {}) {
     formData.append("user", account);
     formData.append("pass", password);
 
-    const res = await noyApi.post(
-      `${base.api}/api/login`,
-      formData.toString(),
-      {
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        },
-        skipAuthRetry: true,
+    const res = await noyApi.post(`${base.api}/api/login`, formData.toString(), {
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
       },
-    );
+      skipAuthRetry: true,
+    });
 
     if (res.status < 200 || res.status >= 300) {
       flutterTools.showToast({
@@ -227,7 +223,6 @@ async function loginWithPassword(payload: LoginPayload = {}) {
       ]);
     }
     await saveCookieStore();
-    ``;
     return account;
   })();
 
@@ -235,6 +230,7 @@ async function loginWithPassword(payload: LoginPayload = {}) {
     await loginInFlight;
     return {
       source: PLUGIN_ID,
+      message: "登录成功",
       data: { account, password },
     };
   } finally {
@@ -242,10 +238,50 @@ async function loginWithPassword(payload: LoginPayload = {}) {
   }
 }
 
-function readSettingPayloadValue(
-  payload: Record<string, unknown>,
-  key: string,
-) {
+async function getLoginBundle(): Promise<LoginBundleContract> {
+  const account = await loadAuthAccount();
+  const password = await loadAuthPassword();
+  return buildLoginBundle(PLUGIN_ID, {
+    title: "NoyAcg 登录",
+    fields: [
+      { key: "account", kind: "text", label: "用户名", required: true },
+      { key: "password", kind: "password", label: "密码", required: true },
+    ],
+    submitFnPath: "loginWithPassword",
+    submitText: "登录",
+    values: { account, password },
+  });
+}
+
+function unauthorizedError(message?: string): Error {
+  return buildUnauthorizedError(PLUGIN_ID, message ?? "登录过期，请重新登录");
+}
+
+/**
+ * 旧宿主（< 3.0.34，不懂 getLoginBundle）走 settings 账号密码区登录。
+ * 三段比较：4.0.0 > 3.0.34，缺段按 0 补齐。
+ */
+function compareVersions(a: string, b: string): number {
+  const pa = String(a ?? "")
+    .split(".")
+    .map((x) => Number(x) || 0);
+  const pb = String(b ?? "")
+    .split(".")
+    .map((x) => Number(x) || 0);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i += 1) {
+    const diff = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+async function isLegacyHost(): Promise<boolean> {
+  const version = await flutterTools.getAppVersion();
+  return compareVersions(version, "3.0.34") < 0;
+}
+
+function readSettingPayloadValue(payload: Record<string, unknown>, key: string) {
   const direct = payload.value;
   if (direct !== undefined && direct !== null) {
     return decodeConfigString(direct, "");
@@ -264,10 +300,7 @@ function readSettingPayloadValue(
 }
 
 async function setAccountAndLogin(payload: Record<string, unknown> = {}) {
-  const account = readSettingPayloadValue(
-    payload,
-    AUTH_ACCOUNT_CONFIG_KEY,
-  ).trim();
+  const account = readSettingPayloadValue(payload, AUTH_ACCOUNT_CONFIG_KEY).trim();
   await saveConfigString(AUTH_ACCOUNT_CONFIG_KEY, account);
   const password = await loadAuthPassword();
   await loginWithPassword({
@@ -354,12 +387,9 @@ function createPagingInfo(page: number, pageCount: number, total: number) {
 }
 
 async function tryAutoLogin(reason: string) {
-  const [account, password] = await Promise.all([
-    loadAuthAccount(),
-    loadAuthPassword(),
-  ]);
+  const [account, password] = await Promise.all([loadAuthAccount(), loadAuthPassword()]);
   if (!account || !String(password).trim()) {
-    throw new Error("需要登录，请在设置中填写账号密码");
+    throw unauthorizedError("需要登录，请在设置中填写账号密码");
   }
   try {
     await loginWithPassword({
@@ -383,9 +413,7 @@ function buildSearchResult(
   baseImg: string,
   ext: Record<string, unknown> | null | undefined,
 ) {
-  const dataList = (
-    Array.isArray(json.data) ? json.data : []
-  ) as SearchApiItem[];
+  const dataList = (Array.isArray(json.data) ? json.data : []) as SearchApiItem[];
   const total = toNumber(json.count, dataList.length);
   const pageSize = 20;
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
@@ -399,16 +427,13 @@ function buildSearchResult(
     const isFinished = item.status === 0;
     const statusText = isFinished ? "短篇" : "连载中";
     const tagList = Array.isArray(item.tags) ? item.tags : [];
-    const description = String(item.description ?? "").trim();
     const path = `comic/${comicId}/cover.webp`;
 
     return {
       source: PLUGIN_ID,
       id: comicId,
       title,
-      subtitle: [author, isAdult ? "R18" : null, statusText]
-        .filter(Boolean)
-        .join(" · "),
+      subtitle: [author, isAdult ? "R18" : null, statusText].filter(Boolean).join(" · "),
       finished: isFinished,
       likesCount: toNumber(item.favorites, 0),
       viewsCount: toNumber(item.views, 0),
@@ -421,15 +446,11 @@ function buildSearchResult(
         extern: { path },
       },
       metadata: [
-        createMetadataActionList(
-          "author",
-          "作者",
-          author ? [author] : [],
-          (item) =>
-            createActionItem(item, {
-              type: "openSearch",
-              payload: { keyword: item, extern: { mode: "author" } },
-            }),
+        createMetadataActionList("author", "作者", author ? [author] : [], (item) =>
+          createActionItem(item, {
+            type: "openSearch",
+            payload: { keyword: item, extern: { mode: "author" } },
+          }),
         ),
         createBasicMetadata("status", "状态", [statusText]),
         createBasicMetadata("categories", "分类", []),
@@ -563,9 +584,7 @@ type SearchApiItem = {
   rating_sum?: number;
 };
 
-async function searchComic(
-  payload: SearchPayload = {},
-): Promise<SearchResultContract> {
+async function searchComic(payload: SearchPayload = {}): Promise<SearchResultContract> {
   const payloadMap = toStringMap(payload);
   const extern = toStringMap(payload.extern);
   const page = Math.max(1, Number(payload.page ?? 1) || 1);
@@ -586,15 +605,11 @@ async function searchComic(
   });
 
   const domainGroup = await getDomainGroup();
-  const res = await noyApi.post(
-    `${domainGroup.api}/api/v4/search/fetch`,
-    formData.toString(),
-    {
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-      },
+  const res = await noyApi.post(`${domainGroup.api}/api/v4/search/fetch`, formData.toString(), {
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
     },
-  );
+  });
 
   if (res.status < 200 || res.status >= 300) {
     throw new Error(`搜索请求失败(${res.status})`);
@@ -661,9 +676,7 @@ type BookApiResponse = {
   };
 };
 
-async function getComicDetail(
-  payload: ComicDetailPayload = {},
-): Promise<ComicDetailContract> {
+async function getComicDetail(payload: ComicDetailPayload = {}): Promise<ComicDetailContract> {
   const comicId = String(payload.comicId ?? "").trim();
   if (!comicId) {
     throw new Error("comicId 不能为空");
@@ -694,11 +707,8 @@ function buildComicDetail(
   const title = String(info.Bookname ?? "").trim() || `漫画 #${comicId}`;
   const coverUrl = comicId ? `${baseImg}/${comicId}/m1.webp` : "";
   const author = String(info.Author ?? "").trim();
-  const isAdult = info.Adult === 1;
   const isFinished = info.Status === 0;
-  const isFavourite = toBoolean(
-    info.F ?? info.f ?? info.is_favorite ?? info.favorite,
-  );
+  const isFavourite = toBoolean(info.F ?? info.f ?? info.is_favorite ?? info.favorite);
   const statusText = isFinished ? "短篇" : "连载中";
   const description = String(info.Description ?? "").trim();
   const originList = String(info.Otag ?? "")
@@ -722,15 +732,13 @@ function buildComicDetail(
     .flatMap((category) => {
       const categoryId = String(category.id ?? "");
       const categoryName = String(category.name ?? "").trim();
-      const chapters =
-        chapterData[categoryId] ?? chapterData[String(category.id)] ?? [];
+      const chapters = chapterData[categoryId] ?? chapterData[String(category.id)] ?? [];
       if (!Array.isArray(chapters)) return [];
 
       return chapters.map((chapter, chapterIndex) => {
         const id = String(chapter.id ?? "").trim();
         if (!id) return null;
-        const name =
-          String(chapter.name ?? "").trim() || `第${chapterIndex + 1}话`;
+        const name = String(chapter.name ?? "").trim() || `第${chapterIndex + 1}话`;
         const pageCount = toNumber(chapter.count, 0);
         return {
           id,
@@ -792,7 +800,7 @@ function buildComicDetail(
           path: "",
           extern: {},
         }),
-        onTap: {},
+        onTap: null,
         extern: {},
       },
       description,
@@ -804,15 +812,11 @@ function buildComicDetail(
         extern: {},
       }),
       metadata: [
-        createMetadataActionList(
-          "author",
-          "作者",
-          author ? [author] : [],
-          (item) =>
-            createActionItem(item, {
-              type: "openSearch",
-              payload: { keyword: item, extern: { mode: "author" } },
-            }),
+        createMetadataActionList("author", "作者", author ? [author] : [], (item) =>
+          createActionItem(item, {
+            type: "openSearch",
+            payload: { keyword: item, extern: { mode: "author" } },
+          }),
         ),
         createMetadataActionList("categories", "分类", typeList, (item) =>
           createActionItem(item, {
@@ -847,6 +851,7 @@ function buildComicDetail(
     isLiked: false,
     allowComments: true,
     allowLike: false,
+    allowLikeReason: "NoyAcg暂不支持点赞",
     allowCollected: true,
     allowDownload: true,
     extern: {},
@@ -872,9 +877,7 @@ function buildComicDetail(
 
 // -- Chapter (no API call, just construct image URLs) --
 
-async function getChapter(
-  payload: ChapterPayload = {},
-): Promise<ChapterContentContract> {
+async function getChapter(payload: ChapterPayload = {}): Promise<ChapterContentContract> {
   const extern = toStringMap(payload.extern);
   const comicId = String(payload.comicId ?? extern.comicId ?? "").trim();
   const chapterId = String(payload.chapterId ?? extern.chapterId ?? "").trim();
@@ -883,8 +886,7 @@ async function getChapter(
 
   // We need the page count from extern, or fetch detail to get it
   const pageCount = toNumber(extern.pageCount, 0);
-  const chapterName =
-    String(extern.chapterName ?? "").trim() || `章节 ${chapterId}`;
+  const chapterName = String(extern.chapterName ?? "").trim() || `章节 ${chapterId}`;
 
   const base = await getDomainGroup();
   const chapterSegment = chapterId === "noChapterInfo" ? "" : `/${chapterId}`;
@@ -938,9 +940,7 @@ async function getChapter(
 
 // -- Read snapshot --
 
-async function getReadSnapshot(
-  payload: ReadSnapshotPayload = {},
-): Promise<ReadSnapshotContract> {
+async function getReadSnapshot(payload: ReadSnapshotPayload = {}): Promise<ReadSnapshotContract> {
   const comicId = String(payload.comicId ?? "").trim();
   if (!comicId) throw new Error("comicId 不能为空");
 
@@ -968,9 +968,7 @@ async function getReadSnapshot(
 
   const targetChapter =
     eps.find((item) => item.id === chapterIdInput) ??
-    (orderFromExtern > 0
-      ? eps.find((item) => item.order === orderFromExtern)
-      : undefined) ??
+    (orderFromExtern > 0 ? eps.find((item) => item.order === orderFromExtern) : undefined) ??
     eps[0];
 
   if (!targetChapter) {
@@ -979,8 +977,7 @@ async function getReadSnapshot(
 
   const base = await getDomainGroup();
   const pageCount = toNumber(targetChapter.extern.pageCount, 1);
-  const chapterSegment =
-    targetChapter.id === "noChapterInfo" ? "" : `/${targetChapter.id}`;
+  const chapterSegment = targetChapter.id === "noChapterInfo" ? "" : `/${targetChapter.id}`;
   const pages = Array.from({ length: Math.max(1, pageCount) }, (_, i) => {
     const page = i + 1;
     const name = `${page}.webp`;
@@ -1037,8 +1034,8 @@ async function getReadSnapshot(
 async function fetchImageBytes({
   url = "",
   timeoutMs = 30000,
-  taskGroupKey = "",
-  extern = {},
+  taskGroupKey: _taskGroupKey = "",
+  extern: _extern = {},
 }: FetchImagePayload = {}): Promise<Uint8Array<ArrayBufferLike>> {
   const targetUrl = String(url).trim();
   if (!targetUrl) {
@@ -1046,12 +1043,9 @@ async function fetchImageBytes({
   }
 
   const base = await getDomainGroup();
-  const controller =
-    typeof AbortController !== "undefined" ? new AbortController() : undefined;
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : undefined;
   const resolvedTimeout = Math.max(0, Number(timeoutMs) || 30000);
-  const timer = controller
-    ? setTimeout(() => controller.abort(), resolvedTimeout)
-    : undefined;
+  const timer = controller ? setTimeout(() => controller.abort(), resolvedTimeout) : undefined;
 
   const headers = {
     Referer: `${base.api}/`,
@@ -1074,9 +1068,7 @@ async function fetchImageBytes({
 
     const data = response.data;
     const bytes =
-      data instanceof Uint8Array
-        ? new Uint8Array(data)
-        : new Uint8Array(data as ArrayBuffer);
+      data instanceof Uint8Array ? new Uint8Array(data) : new Uint8Array(data as ArrayBuffer);
     if (bytes.byteLength === 0) {
       throw new Error("图片数据为空");
     }
@@ -1100,9 +1092,7 @@ function createFormBody(payload: RawApiPayload, keys: string[]) {
     if (value === undefined || value === null) continue;
     form.set(
       key,
-      Array.isArray(value)
-        ? value.map((item) => String(item ?? "")).join(",")
-        : String(value),
+      Array.isArray(value) ? value.map((item) => String(item ?? "")).join(",") : String(value),
     );
   }
   return form.toString();
@@ -1154,9 +1144,7 @@ function isSignedInToday(value: unknown) {
   const normalized = String(today ?? "")
     .trim()
     .toLowerCase();
-  return ["true", "1", "yes", "ok", "signed", "signed_in", "已签到"].includes(
-    normalized,
-  );
+  return ["true", "1", "yes", "ok", "signed", "signed_in", "已签到"].includes(normalized);
 }
 
 function waitForSignInRetry() {
@@ -1188,10 +1176,7 @@ async function ensureTodaySignedIn() {
         console.warn("[noy.init] sign-in failed, retrying in 1 minute", error);
       }
     } catch (error) {
-      console.warn(
-        "[noy.init] sign-in record check failed, retrying in 1 minute",
-        error,
-      );
+      console.warn("[noy.init] sign-in record check failed, retrying in 1 minute", error);
     }
 
     await waitForSignInRetry();
@@ -1200,20 +1185,13 @@ async function ensureTodaySignedIn() {
 
 async function getUserInfo(payload: RawApiPayload = {}) {
   const msg =
-    payload.msg === true ||
-    payload.msg === 1 ||
-    String(payload.msg ?? "").toLowerCase() === "true";
+    payload.msg === true || payload.msg === 1 || String(payload.msg ?? "").toLowerCase() === "true";
   const base = await getDomainGroup();
   const endpoint = `${base.api}/api/v3/userinfo${msg ? "?msg=true" : ""}`;
   const response = await noyApi.post(endpoint, createFormBody(payload, []), {
     headers: FORM_HEADERS,
   });
-  return createApiResult(
-    msg ? "用户信息及消息计数" : "用户信息",
-    "POST",
-    endpoint,
-    response,
-  );
+  return createApiResult(msg ? "用户信息及消息计数" : "用户信息", "POST", endpoint, response);
 }
 
 async function getUserInfoWithMsg(payload: RawApiPayload = {}) {
@@ -1226,16 +1204,12 @@ async function getUserInfoBundle(): Promise<UserInfoBundleContract> {
   const nested = toStringMap(data.data);
   const user = toStringMap(data.userinfo ?? data.userInfo ?? nested.userinfo);
   const read = (...keys: string[]) =>
-    keys
-      .map((key) => user[key])
-      .find((value) => value !== undefined && value !== null);
+    keys.map((key) => user[key]).find((value) => value !== undefined && value !== null);
 
-  const username = String(
-    read("Username", "username", "nickname") ?? "",
-  ).trim();
+  const username = String(read("Username", "username", "nickname") ?? "").trim();
   if (!username) {
     const message = String(data.message ?? data.msg ?? "").trim();
-    throw new Error(message || "未获取到用户信息，请先完成登录或刷新会话");
+    throw unauthorizedError(message || "未获取到用户信息，请先完成登录或刷新会话");
   }
 
   const base = await getDomainGroup();
@@ -1282,18 +1256,14 @@ async function getUserInfoBundle(): Promise<UserInfoBundleContract> {
   };
 }
 
-async function toggleFavorite(
-  payload: RawApiPayload = {},
-): Promise<ToggleFavoriteResult> {
+async function toggleFavorite(payload: RawApiPayload = {}): Promise<ToggleFavoriteResult> {
   const bid = String(payload.comicId ?? payload.bid ?? "").trim();
   if (!bid) throw new Error("作品 ID 不能为空");
   const base = await getDomainGroup();
   const endpoint = `${base.api}/api/v4/favorites/toggle`;
-  const response = await noyApi.post(
-    endpoint,
-    createFormBody({ ...payload, bid }, ["bid"]),
-    { headers: FORM_HEADERS },
-  );
+  const response = await noyApi.post(endpoint, createFormBody({ ...payload, bid }, ["bid"]), {
+    headers: FORM_HEADERS,
+  });
   const result = createApiResult("切换收藏", "POST", endpoint, response);
   const data = toStringMap(result.data);
   const status = String(data.status ?? "")
@@ -1342,9 +1312,7 @@ function getFavoriteApiItems(response: RawApiResult): unknown[] {
   return [];
 }
 
-async function getFavoriteData(
-  payload: RawApiPayload = {},
-): Promise<ComicPagedListContract> {
+async function getFavoriteData(payload: RawApiPayload = {}): Promise<ComicPagedListContract> {
   const extern = toStringMap(payload.extern);
   const page = Math.max(1, Number(payload.page ?? 1) || 1);
   const favoriteClass = String(payload.class ?? extern.class ?? "").trim();
@@ -1515,9 +1483,8 @@ function buildCommentItem(value: unknown, baseImg: string): CommentItem {
     id,
     author: {
       name:
-        String(
-          item.username ?? user.name ?? item.reply_username ?? "匿名用户",
-        ).trim() || "匿名用户",
+        String(item.username ?? user.name ?? item.reply_username ?? "匿名用户").trim() ||
+        "匿名用户",
       avatar: {
         url: avatarUrl,
         path: avatarPath,
@@ -1531,9 +1498,7 @@ function buildCommentItem(value: unknown, baseImg: string): CommentItem {
   };
 }
 
-async function getCommentFeed(
-  payload: RawApiPayload = {},
-): Promise<CommentFeedContract> {
+async function getCommentFeed(payload: RawApiPayload = {}): Promise<CommentFeedContract> {
   const comicId = requireApiPayloadString(payload, "comicId", "作品 ID");
   const page = Math.max(1, Number(payload.page ?? 1) || 1);
   const response = await getBookComments({ ...payload, id: comicId, page });
@@ -1541,9 +1506,7 @@ async function getCommentFeed(
   // console.debug(raw);
   const data = toStringMap(raw.data);
   const comments = data.comments as unknown[];
-  const domainGroup = BASE_GROUPS.find((group) =>
-    response.endpoint.startsWith(group.api),
-  )!;
+  const domainGroup = BASE_GROUPS.find((group) => response.endpoint.startsWith(group.api))!;
   const items = comments.map((item) => buildCommentItem(item, domainGroup.img));
 
   return {
@@ -1568,9 +1531,7 @@ async function getCommentFeed(
   };
 }
 
-async function loadCommentReplies(
-  payload: RawApiPayload = {},
-): Promise<CommentRepliesContract> {
+async function loadCommentReplies(payload: RawApiPayload = {}): Promise<CommentRepliesContract> {
   const comicId = requireApiPayloadString(payload, "comicId", "作品 ID");
   const commentId = requireApiPayloadString(payload, "commentId", "评论 ID");
   const page = Math.max(1, Number(payload.page ?? 1) || 1);
@@ -1617,10 +1578,10 @@ async function getReadLeaderboard(payload: RawApiPayload = {}) {
   const endpoint = `${base.api}/api/readLeaderboard`;
   const response = await noyApi.post(
     endpoint,
-    createFormBody(
-      { ...payload, page: payload.page ?? 1, type: payload.type ?? "day" },
-      ["page", "type"],
-    ),
+    createFormBody({ ...payload, page: payload.page ?? 1, type: payload.type ?? "day" }, [
+      "page",
+      "type",
+    ]),
     { headers: FORM_HEADERS },
   );
   return createApiResult("阅读榜", "POST", endpoint, response);
@@ -1631,10 +1592,10 @@ async function getFavoriteLeaderboard(payload: RawApiPayload = {}) {
   const endpoint = `${base.api}/api/favLeaderboard`;
   const response = await noyApi.post(
     endpoint,
-    createFormBody(
-      { ...payload, page: payload.page ?? 1, type: payload.type ?? "day" },
-      ["page", "type"],
-    ),
+    createFormBody({ ...payload, page: payload.page ?? 1, type: payload.type ?? "day" }, [
+      "page",
+      "type",
+    ]),
     { headers: FORM_HEADERS },
   );
   return createApiResult("收藏榜", "POST", endpoint, response);
@@ -1654,11 +1615,9 @@ async function getProportionLeaderboard(payload: RawApiPayload = {}) {
 async function getHome(payload: RawApiPayload = {}) {
   const base = await getDomainGroup();
   const endpoint = `${base.api}/api/home`;
-  const response = await noyApi.post(
-    endpoint,
-    createFormBody(payload, ["v", "stream_all"]),
-    { headers: FORM_HEADERS },
-  );
+  const response = await noyApi.post(endpoint, createFormBody(payload, ["v", "stream_all"]), {
+    headers: FORM_HEADERS,
+  });
   return createApiResult("首页", "POST", endpoint, response);
 }
 
@@ -1690,7 +1649,7 @@ async function getLatestBooks(payload: RawApiPayload = {}) {
   return createApiResult("最新漫画", "POST", endpoint, response);
 }
 
-async function getRandomBook(payload: RawApiPayload = {}) {
+async function getRandomBook(_payload: RawApiPayload = {}) {
   const base = await getDomainGroup();
   const endpoint = `${base.api}/api/v4/book/random`;
   const response = await noyApi.post(endpoint);
@@ -1725,10 +1684,7 @@ function buildTagSearchChip(
   };
 }
 
-function buildFunctionPage(
-  title: string,
-  items: FunctionPageChipItem[],
-): FunctionPageContract {
+function buildFunctionPage(title: string, items: FunctionPageChipItem[]): FunctionPageContract {
   return {
     source: PLUGIN_ID,
     scheme: {
@@ -1769,9 +1725,7 @@ function buildNavigationPage(
   };
 }
 
-async function getFunctionPage(
-  payload: RawApiPayload = {},
-): Promise<FunctionPageContract> {
+async function getFunctionPage(payload: RawApiPayload = {}): Promise<FunctionPageContract> {
   const extern = toStringMap(payload.extern);
   const id = String(payload.id ?? extern.id ?? "").trim();
 
@@ -1802,9 +1756,7 @@ async function getFunctionPage(
               coverId && coverId !== "0"
                 ? `${responseBase.img}/${coverId}/m1.webp`
                 : NOT_FOUND_IMAGE_URL,
-            path: coverId
-              ? `comic/${coverId}/cover.webp`
-              : PLACEHOLDER_IMAGE_PATH,
+            path: coverId ? `comic/${coverId}/cover.webp` : PLACEHOLDER_IMAGE_PATH,
             extern: {},
           },
           action: {
@@ -1844,10 +1796,7 @@ async function getFunctionPage(
 
 type RankingSource = "read" | "favorite" | "proportion";
 
-function readRankingValue(
-  item: Record<string, unknown>,
-  ...keys: string[]
-): unknown {
+function readRankingValue(item: Record<string, unknown>, ...keys: string[]): unknown {
   for (const key of keys) {
     if (item[key] !== undefined && item[key] !== null) return item[key];
   }
@@ -1861,25 +1810,18 @@ function buildRankingItem(
   options: { ranked?: boolean } = {},
 ) {
   const item = toStringMap(value);
-  const comicId = String(
-    readRankingValue(item, "Bid", "bid", "id", "book_id") ?? "",
-  ).trim();
+  const comicId = String(readRankingValue(item, "Bid", "bid", "id", "book_id") ?? "").trim();
   if (!comicId) return null;
 
   const title =
-    String(
-      readRankingValue(item, "Bookname", "bookname", "name", "title") ?? "",
-    ).trim() || `漫画 ${comicId}`;
-  const author = String(
-    readRankingValue(item, "Author", "author") ?? "",
-  ).trim();
+    String(readRankingValue(item, "Bookname", "bookname", "name", "title") ?? "").trim() ||
+    `漫画 ${comicId}`;
+  const author = String(readRankingValue(item, "Author", "author") ?? "").trim();
   const status = Number(readRankingValue(item, "Status", "status"));
   const adult = Number(readRankingValue(item, "Adult", "adult"));
   const views = toNumber(readRankingValue(item, "Views", "views"));
   const favorites = toNumber(readRankingValue(item, "Favorites", "favorites"));
-  const rating = toNumber(
-    readRankingValue(item, "RatingSUM", "rating_sum", "rating"),
-  );
+  const rating = toNumber(readRankingValue(item, "RatingSUM", "rating_sum", "rating"));
   const isFinished = status === 0;
   const statusText = isFinished ? "短篇" : "连载中";
   const path = `comic/${comicId}/cover.webp`;
@@ -1926,16 +1868,13 @@ function buildRankingItem(
   };
 }
 
-async function getLatestData(
-  payload: RawApiPayload = {},
-): Promise<ComicPagedListContract> {
+async function getLatestData(payload: RawApiPayload = {}): Promise<ComicPagedListContract> {
   const extern = toStringMap(payload.extern);
   const page = Math.max(1, Number(payload.page ?? 1) || 1);
   const sort = String(payload.sort ?? extern.sort ?? "");
   const finished = String(payload.finished ?? extern.finished ?? "");
   const randomValue = payload.random ?? extern.random ?? false;
-  const random =
-    randomValue === true || String(randomValue).toLowerCase() === "true";
+  const random = randomValue === true || String(randomValue).toLowerCase() === "true";
   const response = random
     ? await getRandomBook(payload)
     : await getLatestBooks({ page, sort, finished });
@@ -1952,9 +1891,7 @@ async function getLatestData(
         ? raw.data
         : [];
   const items = rawItems
-    .map((item, index) =>
-      buildRankingItem(item, index, responseBase.img, { ranked: false }),
-    )
+    .map((item, index) => buildRankingItem(item, index, responseBase.img, { ranked: false }))
     .filter((item): item is NonNullable<typeof item> => item !== null);
   const total = toNumber(raw.len ?? nested.len, rawItems.length);
   const pageSize = 20;
@@ -1975,21 +1912,15 @@ async function getLatestData(
   };
 }
 
-async function getRankingData(
-  payload: RawApiPayload = {},
-): Promise<ComicPagedListContract> {
+async function getRankingData(payload: RawApiPayload = {}): Promise<ComicPagedListContract> {
   const extern = toStringMap(payload.extern);
-  const leaderboardValue = String(
-    payload.leaderboard ?? extern.leaderboard ?? "read",
-  );
+  const leaderboardValue = String(payload.leaderboard ?? extern.leaderboard ?? "read");
   const leaderboard: RankingSource =
     leaderboardValue === "favorite" || leaderboardValue === "proportion"
       ? leaderboardValue
       : "read";
   const rankTypeValue = String(payload.rankType ?? extern.rankType ?? "day");
-  const rankType = ["day", "week", "moon"].includes(rankTypeValue)
-    ? rankTypeValue
-    : "day";
+  const rankType = ["day", "week", "moon"].includes(rankTypeValue) ? rankTypeValue : "day";
   const page = Math.max(1, Number(payload.page ?? 1) || 1);
   const domainGroup = await getDomainGroup();
 
@@ -2003,8 +1934,7 @@ async function getRankingData(
   }
 
   const responseBase =
-    BASE_GROUPS.find((group) => response.endpoint.startsWith(group.api)) ??
-    domainGroup;
+    BASE_GROUPS.find((group) => response.endpoint.startsWith(group.api)) ?? domainGroup;
   const raw = toStringMap(response.data);
   const nested = toStringMap(raw.data);
   const rawItems = Array.isArray(raw.info)
@@ -2036,9 +1966,7 @@ async function getRankingData(
   };
 }
 
-async function getRankingFilterBundle(
-  _payload: RawApiPayload = {},
-): Promise<FilterBundleContract> {
+async function getRankingFilterBundle(_payload: RawApiPayload = {}): Promise<FilterBundleContract> {
   return {
     source: PLUGIN_ID,
     scheme: {
@@ -2125,9 +2053,7 @@ async function getRankingFilterBundle(
   };
 }
 
-async function getLatestFilterBundle(
-  _payload: RawApiPayload = {},
-): Promise<FilterBundleContract> {
+async function getLatestFilterBundle(_payload: RawApiPayload = {}): Promise<FilterBundleContract> {
   return {
     source: PLUGIN_ID,
     scheme: {
@@ -2209,13 +2135,11 @@ async function getLatestFilterBundle(
 // -- Settings --
 
 async function getSettingsBundle(): Promise<SettingsBundleContract> {
-  const [account, password] = await Promise.all([
-    loadAuthAccount(),
-    loadAuthPassword(),
-  ]);
+  const [account, password] = await Promise.all([loadAuthAccount(), loadAuthPassword()]);
 
   const domainGroup = await readConfigValue(DOMAIN_GROUP_CONFIG_KEY, "0");
   const allowAdult = await readConfigValue(ALLOW_ADULT_CONFIG_KEY, "both");
+  const legacyHost = await isLegacyHost();
 
   const data = {
     source: PLUGIN_ID,
@@ -2223,24 +2147,28 @@ async function getSettingsBundle(): Promise<SettingsBundleContract> {
       version: "1.0.0" as const,
       type: "settings",
       sections: [
-        {
-          id: "account",
-          title: "账号",
-          fields: [
-            {
-              key: AUTH_ACCOUNT_CONFIG_KEY,
-              kind: "text",
-              label: "用户名",
-              fnPath: "setAccountAndLogin",
-            },
-            {
-              key: AUTH_PASSWORD_CONFIG_KEY,
-              kind: "password",
-              label: "密码",
-              fnPath: "setPasswordAndLogin",
-            },
-          ],
-        },
+        ...(legacyHost
+          ? [
+              {
+                id: "account",
+                title: "账号",
+                fields: [
+                  {
+                    key: AUTH_ACCOUNT_CONFIG_KEY,
+                    kind: "text",
+                    label: "用户名",
+                    fnPath: "setAccountAndLogin",
+                  },
+                  {
+                    key: AUTH_PASSWORD_CONFIG_KEY,
+                    kind: "password",
+                    label: "密码",
+                    fnPath: "setPasswordAndLogin",
+                  },
+                ],
+              },
+            ]
+          : []),
         {
           id: "network",
           title: "网络",
@@ -2280,11 +2208,16 @@ async function getSettingsBundle(): Promise<SettingsBundleContract> {
     data: {
       canShowUserInfo: true,
       values: {
-        [AUTH_ACCOUNT_CONFIG_KEY]: account,
-        [AUTH_PASSWORD_CONFIG_KEY]: password,
+        ...(legacyHost
+          ? {
+              [AUTH_ACCOUNT_CONFIG_KEY]: account,
+              [AUTH_PASSWORD_CONFIG_KEY]: password,
+            }
+          : {}),
         [DOMAIN_GROUP_CONFIG_KEY]: domainGroup,
         [ALLOW_ADULT_CONFIG_KEY]: allowAdult,
       },
+      canLogin: true,
     },
   };
 
@@ -2297,10 +2230,7 @@ async function init() {
   if (!noyInitStarted) {
     noyInitStarted = true;
     try {
-      const [account, password] = await Promise.all([
-        loadAuthAccount(),
-        loadAuthPassword(),
-      ]);
+      const [account, password] = await Promise.all([loadAuthAccount(), loadAuthPassword()]);
       if (account && String(password).trim()) {
         await loginWithPassword({
           account,
@@ -2335,9 +2265,13 @@ export default {
   init,
   // 返回插件名称、版本和功能元信息。
   getInfo,
-  // 保存用户名并重新登录。
+  // 返回登录表单定义。
+  getLoginBundle,
+  // 账号密码登录。
+  loginWithPassword,
+  // 保存用户名并重新登录（旧宿主兼容）。
   setAccountAndLogin,
-  // 保存密码并重新登录。
+  // 保存密码并重新登录（旧宿主兼容）。
   setPasswordAndLogin,
   // 切换 API 线路并清理旧线路的 Cookie。
   setDomainGroup,

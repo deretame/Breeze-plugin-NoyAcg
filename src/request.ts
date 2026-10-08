@@ -1,8 +1,4 @@
-import axios, {
-  AxiosHeaders,
-  type AxiosRequestConfig,
-  type AxiosResponse,
-} from "axios";
+import axios, { AxiosHeaders, type AxiosRequestConfig, type AxiosResponse } from "axios";
 import { cache, pluginConfig } from "breeze-plugin-kit";
 
 declare module "axios" {
@@ -63,16 +59,9 @@ function decodeConfigString(raw: unknown, fallback = "") {
       (parsed as Record<string, unknown>).ok === true &&
       "value" in (parsed as Record<string, unknown>)
     ) {
-      return decodeConfigString(
-        (parsed as Record<string, unknown>).value,
-        fallback,
-      );
+      return decodeConfigString((parsed as Record<string, unknown>).value, fallback);
     }
-    if (
-      typeof parsed === "string" ||
-      typeof parsed === "number" ||
-      typeof parsed === "boolean"
-    ) {
+    if (typeof parsed === "string" || typeof parsed === "number" || typeof parsed === "boolean") {
       return String(parsed);
     }
   } catch {
@@ -86,18 +75,13 @@ async function loadConfigString(key: string, fallback: string) {
   return decodeConfigString(raw, fallback);
 }
 
-export function setAutoLoginHandler(
-  handler: (reason: string) => Promise<unknown>,
-) {
+export function setAutoLoginHandler(handler: (reason: string) => Promise<unknown>) {
   autoLoginHandler = handler;
 }
 
 export async function getDomainGroup(): Promise<BaseApiGroup> {
   try {
-    const raw = await loadConfigString(
-      DOMAIN_GROUP_CONFIG_KEY,
-      String(DEFAULT_DOMAIN_GROUP_INDEX),
-    );
+    const raw = await loadConfigString(DOMAIN_GROUP_CONFIG_KEY, String(DEFAULT_DOMAIN_GROUP_INDEX));
     const index = Number(raw);
     return BASE_GROUPS[
       Number.isInteger(index) && index >= 0 && index < BASE_GROUPS.length
@@ -159,16 +143,12 @@ function headersToRecord(headers: unknown): Record<string, string> {
     toJSON?: () => unknown;
     [key: string]: unknown;
   };
-  const json =
-    typeof source.toJSON === "function" ? source.toJSON() : headers;
+  const json = typeof source.toJSON === "function" ? source.toJSON() : headers;
   if (!json || typeof json !== "object") return {};
-  return Object.entries(json).reduce<Record<string, string>>(
-    (result, [key, value]) => {
-      if (typeof value === "string") result[key] = value;
-      return result;
-    },
-    {},
-  );
+  return Object.entries(json).reduce<Record<string, string>>((result, [key, value]) => {
+    if (typeof value === "string") result[key] = value;
+    return result;
+  }, {});
 }
 
 function getHeaderValue(headers: unknown, name: string): string {
@@ -177,16 +157,11 @@ function getHeaderValue(headers: unknown, name: string): string {
     get?: (key: string) => unknown;
     [key: string]: unknown;
   };
-  const direct =
-    typeof source.get === "function" ? source.get(name) : undefined;
+  const direct = typeof source.get === "function" ? source.get(name) : undefined;
   if (direct !== undefined && direct !== null) return String(direct);
   const lowerName = name.toLowerCase();
-  const entry = Object.entries(headers).find(
-    ([key]) => key.toLowerCase() === lowerName,
-  );
-  return entry?.[1] === undefined || entry?.[1] === null
-    ? ""
-    : String(entry[1]);
+  const entry = Object.entries(headers).find(([key]) => key.toLowerCase() === lowerName);
+  return entry?.[1] === undefined || entry?.[1] === null ? "" : String(entry[1]);
 }
 
 function getSetCookieHeaders(headers: unknown): string[] {
@@ -197,9 +172,7 @@ function getSetCookieHeaders(headers: unknown): string[] {
     [key: string]: unknown;
   };
   const fromGetSetCookie =
-    typeof source.getSetCookie === "function"
-      ? source.getSetCookie()
-      : undefined;
+    typeof source.getSetCookie === "function" ? source.getSetCookie() : undefined;
   const value =
     fromGetSetCookie ??
     (typeof source.get === "function" ? source.get("set-cookie") : undefined) ??
@@ -286,30 +259,12 @@ noyApi.interceptors.response.use(async (response) => {
   return response;
 });
 
-function appendFormValue(form: URLSearchParams, key: string, value: unknown) {
-  if (value === undefined || value === null) return;
-  form.set(
-    key,
-    Array.isArray(value)
-      ? value.map((item) => String(item ?? "")).join(",")
-      : String(value),
-  );
-}
-
-export function getApiPayloadString(
-  payload: RawApiPayload,
-  key: string,
-  fallback = "",
-) {
+export function getApiPayloadString(payload: RawApiPayload, key: string, fallback = "") {
   const value = payload[key];
   return value === undefined || value === null ? fallback : String(value);
 }
 
-export function requireApiPayloadString(
-  payload: RawApiPayload,
-  key: string,
-  label = key,
-) {
+export function requireApiPayloadString(payload: RawApiPayload, key: string, label = key) {
   const value = getApiPayloadString(payload, key).trim();
   if (!value) throw new Error(`${label} 不能为空`);
   return value;
