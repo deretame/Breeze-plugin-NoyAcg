@@ -8,10 +8,12 @@ export function buildPluginInfo(): InfoContract {
     iconUrl:
       "https://raw.githubusercontent.com/deretame/Breeze-plugin-NoyAcg/main/assets/ic_launcher_foreground.webp",
     describe: "NoyAcg 插件",
-    version: "0.0.8",
+    version: "0.1.0",
     home: "https://github.com/deretame/Breeze-plugin-NoyAcg",
     updateUrl: "https://api.github.com/repos/deretame/Breeze-plugin-NoyAcg/releases/latest",
     npmName: "breeze-plugin-noy-acg",
+    haveHome: true,
+    haveCloudFavorite: true,
     function: [
       {
         id: "ranking",
@@ -89,9 +91,24 @@ export function buildPluginInfo(): InfoContract {
         id: "cloudFavorite",
         title: "云端收藏",
         action: {
-          type: "openCloudFavorite",
+          type: "openComicList",
           payload: {
-            title: "云端收藏",
+            scene: {
+              title: "云端收藏",
+              source: PLUGIN_ID,
+              body: {
+                type: "pluginPagedComicList",
+                request: {
+                  fnPath: "getFavoriteData",
+                  core: {},
+                  extern: { source: "cloudFavorite", class: "", filter: "" },
+                },
+              },
+              filter: {
+                fnPath: "getCloudFavoriteFilterBundle",
+                extern: { source: "cloudFavorite" },
+              },
+            },
           },
         },
       },

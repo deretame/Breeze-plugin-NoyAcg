@@ -14,6 +14,8 @@ import type {
   FunctionPageContract,
   LoginBundleContract,
   LoginSubmitResult,
+  PluginCloudFavoritePagesBundleContract,
+  PluginHomePagesBundleContract,
   ReadSnapshotContract,
   SearchResultContract,
   ToggleFavoriteResult,
@@ -1149,40 +1151,56 @@ function isSignedInToday(value: unknown) {
   return ["true", "1", "yes", "ok", "signed", "signed_in", "已签到"].includes(normalized);
 }
 
-function waitForSignInRetry() {
-  return new Promise<void>((resolve) => setTimeout(resolve, 60_000));
+const SIGN_IN_RETRY_DELAY_MS = 60_000;
+let autoSignInPromise: Promise<void> | null = null;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
-async function ensureTodaySignedIn() {
-  while (true) {
+async function runAutoSignInUntilSuccess(): Promise<void> {
+  for (;;) {
     try {
       const record = await getSignInRecord();
       if (isSignedInToday(record.data)) {
         console.info("[noy.init] already signed in today");
         return;
       }
-
-      try {
-        await signIn();
-        console.info("[noy.init] sign-in success");
-        try {
-          await flutterTools.showToast({
-            message: "noyacg 自动签到成功",
-            level: "success",
-          });
-        } catch (error) {
-          console.warn("[noy.init] sign-in notification failed", error);
-        }
-        return;
-      } catch (error) {
-        console.warn("[noy.init] sign-in failed, retrying in 1 minute", error);
-      }
     } catch (error) {
-      console.warn("[noy.init] sign-in record check failed, retrying in 1 minute", error);
+      console.warn("[noy.init] sign-in record check failed, retry in 60s", error);
+      await sleep(SIGN_IN_RETRY_DELAY_MS);
+      continue;
     }
 
-    await waitForSignInRetry();
+    try {
+      await signIn();
+      console.info("[noy.init] sign-in success");
+      try {
+        await flutterTools.showToast({
+          message: "noyacg 自动签到成功",
+          level: "success",
+        });
+      } catch (error) {
+        console.warn("[noy.init] sign-in notification failed", error);
+      }
+      return;
+    } catch (error) {
+      console.warn("[noy.init] sign-in failed, retry in 60s", error);
+      await sleep(SIGN_IN_RETRY_DELAY_MS);
+    }
   }
+}
+
+function ensureTodaySignedInOnce(): Promise<void> {
+  autoSignInPromise ??= runAutoSignInUntilSuccess().catch((error) => {
+    // 后台循环自身不抛错：兜底防止未处理的 rejection 炸掉 init 链，
+    // 并允许下一次调用重新启动循环。
+    console.warn("[noy.init] auto sign-in loop exited unexpectedly", error);
+    autoSignInPromise = null;
+  });
+  return autoSignInPromise;
 }
 
 async function getUserInfo(payload: RawApiPayload = {}) {
@@ -1428,6 +1446,108 @@ async function getCloudFavoriteSceneBundle(): Promise<ComicListSceneBundleContra
           extern: { source: "cloudFavorite" },
         },
       },
+    },
+  };
+}
+async function getPluginHomePagesBundle(): Promise<PluginHomePagesBundleContract> {
+  return {
+    source: PLUGIN_ID,
+    scheme: {
+      version: "1.0.0",
+      type: "homePagesBundle",
+    },
+    data: {
+      tabs: [
+        {
+          id: "latest",
+          title: "最新",
+          scene: {
+            title: "最新",
+            source: PLUGIN_ID,
+            body: {
+              type: "pluginPagedComicList",
+              request: {
+                fnPath: "getLatestData",
+                core: {},
+                extern: {
+                  sort: "",
+                  finished: "",
+                  random: false,
+                },
+              },
+            },
+            filter: {
+              fnPath: "getLatestFilterBundle",
+              core: {},
+              extern: {},
+            },
+          },
+        },
+        {
+          id: "ranking",
+          title: "排行榜",
+          scene: {
+            title: "排行榜",
+            source: PLUGIN_ID,
+            body: {
+              type: "pluginPagedComicList",
+              request: {
+                fnPath: "getRankingData",
+                core: {},
+                extern: {
+                  leaderboard: "read",
+                  rankType: "day",
+                },
+              },
+            },
+            filter: {
+              fnPath: "getRankingFilterBundle",
+              extern: {
+                ranking: "read-day",
+              },
+            },
+          },
+        },
+        {
+          id: "categories",
+          title: "分类",
+          page: await getFunctionPage({ id: "categories" }),
+        },
+      ],
+    },
+  };
+}
+
+async function getPluginCloudFavoritePagesBundle(): Promise<PluginCloudFavoritePagesBundleContract> {
+  return {
+    source: PLUGIN_ID,
+    scheme: {
+      version: "1.0.0",
+      type: "cloudFavoritePagesBundle",
+    },
+    data: {
+      tabs: [
+        {
+          id: "cloudFavorite",
+          title: "云端收藏",
+          scene: {
+            title: "云端收藏",
+            source: PLUGIN_ID,
+            body: {
+              type: "pluginPagedComicList",
+              request: {
+                fnPath: "getFavoriteData",
+                core: {},
+                extern: { source: "cloudFavorite", class: "", filter: "" },
+              },
+            },
+            filter: {
+              fnPath: "getCloudFavoriteFilterBundle",
+              extern: { source: "cloudFavorite" },
+            },
+          },
+        },
+      ],
     },
   };
 }
@@ -2228,28 +2348,36 @@ async function getSettingsBundle(): Promise<SettingsBundleContract> {
 
 // -- Init --
 
+async function loginForInit(): Promise<void> {
+  const [account, password] = await Promise.all([loadAuthAccount(), loadAuthPassword()]);
+  if (!account || !String(password).trim()) {
+    console.info("[noy.init] skip login: no credentials");
+    return;
+  }
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      await loginWithPassword({
+        account,
+        password,
+        reason: "init",
+        persistCredentials: true,
+      });
+      console.info(`[noy.init] login ok (attempt ${attempt})`);
+      void ensureTodaySignedInOnce();
+      return;
+    } catch (error) {
+      lastError = error;
+      console.warn(`[noy.init] login failed (attempt ${attempt}/3)`, error);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(`登录失败，已重试 3 次: ${String(lastError)}`);
+}
+
 async function init() {
   if (!noyInitStarted) {
     noyInitStarted = true;
-    try {
-      const [account, password] = await Promise.all([loadAuthAccount(), loadAuthPassword()]);
-      if (account && String(password).trim()) {
-        await loginWithPassword({
-          account,
-          password,
-          reason: "init",
-          persistCredentials: true,
-        });
-        console.info("[noy.init] login success");
-        void ensureTodaySignedIn().catch((error) =>
-          console.warn("[noy.init] background sign-in stopped", error),
-        );
-      } else {
-        console.info("[noy.init] skip login: no credentials");
-      }
-    } catch (error) {
-      console.warn("[noy.init] login failed", error);
-    }
+    await loginForInit();
   }
 
   return {
@@ -2305,6 +2433,10 @@ export default {
   getCloudFavoriteFilterBundle,
   // 获取云端收藏页面定义。
   getCloudFavoriteSceneBundle,
+  // 获取插件首页 Tab 页定义。
+  getPluginHomePagesBundle,
+  // 获取云端收藏 Tab 页定义。
+  getPluginCloudFavoritePagesBundle,
   // 获取格式化后的漫画评论列表。
   getCommentFeed,
   // 获取指定评论的回复列表。
